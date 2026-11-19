@@ -2,19 +2,25 @@ name: Windows PowerShell checks
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  windows:
+  windows-powershell:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        shell: [powershell, pwsh]
     steps:
       - uses: actions/checkout@v4
       - name: Parse scripts and verify installer functions
-        shell: ${{ matrix.shell }}
+        shell: powershell
+        run: ./tests/Test-Functions.ps1
+
+  powershell-7:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse scripts and verify installer functions
+        shell: pwsh
         run: ./tests/Test-Functions.ps1
