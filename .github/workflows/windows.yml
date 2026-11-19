@@ -1,0 +1,20 @@
+name: Windows PowerShell checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse scripts and verify installer functions
+        shell: ${{ matrix.shell }}
+        run: ./tests/Test-Functions.ps1
