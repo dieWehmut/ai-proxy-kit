@@ -1,0 +1,5 @@
+{
+  "upstreamRepository": "Wei-Shaw/sub2api",
+  "zoneInfoUrl": "https://raw.githubusercontent.com/golang/go/go1.24.0/lib/time/zoneinfo.zip",
+  "zoneInfoSha256": "58b3770b2c2216eaa856c18464dcac90bcb8547764e40ef660ef3b0f19cd43d0"
+}
