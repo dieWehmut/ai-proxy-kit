@@ -15,7 +15,10 @@ $files = @('install-sub2api.cmd', 'install-sub2api.ps1', 'start-sub2api.cmd', 's
     'proxykit.ps1', 'compose.yml', 'compose.workbuddy-proxy.yml', '.env.example',
     'lib\proxykit.py', 'scripts\connect-sub2api.py', 'tools\build-workbuddy-proxy.py',
     'tests\test_proxykit.py', 'docs\SUB2API_WINDOWS.md', 'docs\AISTUDIO_COMPARISON.md',
-    'docs\VALIDATION.md')
+    'docs\VALIDATION.md', 'docs\AISTUDIO_LOCAL_LOGIN.md', 'scripts\import-aistudio-session.py',
+    'tools\google-session-extension\manifest.json', 'tools\google-session-extension\background.js',
+    'tools\google-session-extension\export.html', 'tools\google-session-extension\export.mjs',
+    'tests\test_aistudio_session.py', 'tests\test_google_session_export.mjs')
 Add-Type -AssemblyName System.IO.Compression
 $archive = Join-Path $dist "ai-proxy-kit-$Version.zip"
 $stream = [IO.File]::Open($archive, [IO.FileMode]::Create)

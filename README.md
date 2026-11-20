@@ -86,6 +86,9 @@ bash check.sh antigravity --model gemini-3.8-flash-low
 - sub2api：用 `SUB2API_EMAIL` / `SUB2API_PASSWORD` 登录。首次在页面确认上游管理员承诺；标准计费模式需要正余额。
 - AI Studio：控制台密码为 `AISTUDIO_WEB_PASSWORD`，API Key 为 `AISTUDIO_API_KEY`；通过控制台 VNC 完成本人 Google 登录。
 
+本机浏览器已经登录 Google 时，可以直接[导出并复用现有会话](docs/AISTUDIO_LOCAL_LOGIN.md)，
+导入脚本会通知现有 AI Studio 重载。
+
 已有账号可显式接入；Windows 目录在 WSL 下使用 `/mnt/c/`、`/mnt/d/` 路径：
 
 ```bash
