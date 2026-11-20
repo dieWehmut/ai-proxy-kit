@@ -21,3 +21,4 @@ runtime/
 __pycache__/
 *.pyc
 .venv/
+ai-proxy-kit-google-session*.json

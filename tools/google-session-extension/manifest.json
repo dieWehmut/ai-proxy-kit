@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "AI Proxy Kit - Google Session",
+  "version": "1.0.0",
+  "description": "Export the current Google session locally for your AI Studio instance.",
+  "permissions": ["cookies"],
+  "host_permissions": ["https://*.google.com/*"],
+  "action": {"default_popup": "export.html", "default_title": "Export Google session"},
+  "background": {"service_worker": "background.js"}
+}

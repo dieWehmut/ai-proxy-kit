@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>复用本机 Google 登录</title>
+<style>
+  body {font:16px/1.6 system-ui,sans-serif; max-width:620px; min-width:320px; margin:40px auto; padding:24px; color:#182333}
+  button {font:inherit; padding:10px 18px; background:#1767c1; color:white; border:0; border-radius:8px; cursor:pointer}
+  button:disabled {opacity:.6; cursor:wait}
+  #status {white-space:pre-wrap}
+</style>
+<h1>复用本机 Google 登录</h1>
+<p>将当前浏览器的 Google 登录会话保存到本机，供 AI Studio 使用。</p>
+<button id="export">导出当前 Google 会话</button>
+<p id="status" role="status">请在已经登录 Google 的浏览器资料中使用。</p>
+<script type="module" src="export.mjs"></script>
+</html>
