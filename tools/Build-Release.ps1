@@ -10,9 +10,14 @@ $files = @('install-sub2api.cmd', 'install-sub2api.ps1', 'start-sub2api.cmd', 's
     'stop-sub2api.cmd', 'stop-sub2api.ps1', 'run-sub2api.ps1', 'lib\Sub2API.Windows.ps1',
     'services\docker-compose.yml', 'assets\downloads.json', 'README.md', 'LICENSE',
     '.gitignore', '.gitattributes', 'tests\Test-Functions.ps1', 'tests\Test-Installation.ps1',
-    'tools\Build-Release.ps1')
+    'tools\Build-Release.ps1', 'install.sh', 'start.sh', 'stop.sh', 'status.sh', 'check.sh',
+    'connect.sh', 'install.cmd', 'start.cmd', 'stop.cmd', 'status.cmd', 'check.cmd',
+    'proxykit.ps1', 'compose.yml', 'compose.workbuddy-proxy.yml', '.env.example',
+    'lib\proxykit.py', 'scripts\connect-sub2api.py', 'tools\build-workbuddy-proxy.py',
+    'tests\test_proxykit.py', 'docs\SUB2API_WINDOWS.md', 'docs\AISTUDIO_COMPARISON.md',
+    'docs\VALIDATION.md')
 Add-Type -AssemblyName System.IO.Compression
-$archive = Join-Path $dist "sub2api-windows-installer-$Version.zip"
+$archive = Join-Path $dist "ai-proxy-kit-$Version.zip"
 $stream = [IO.File]::Open($archive, [IO.FileMode]::Create)
 $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
 try {

@@ -1,112 +1,154 @@
-# Sub2API Windows 一键安装
+# AI Proxy Kit
 
-下载、解压，双击 `install-sub2api.cmd`。脚本会安装 Windows 原生 Sub2API、启动 PostgreSQL 和 Redis、自动创建管理员，完成后直接打开登录页，**无需经过 Sub2API 安装向导**。
+统一管理 **Antigravity Manager、WorkBuddy2API、Sub2API**，另提供选定的
+**AIStudioToAPI** 可选入口。所有对外网关明确监听并发布 **`0.0.0.0`**。
 
-新安装默认关闭 Cloudflare Turnstile 人机验证。每次新安装生成独立的数据库密码、管理员密码、JWT 密钥和 TOTP 加密密钥，不使用共享默认密码。
+支持 Linux AMD64 / ARM64、WSL2，以及 Windows 双击调用 WSL。
+保留原 `sub2api-windows-installer` 的 Git 历史和 Windows 原生安装器。
 
-## 使用条件
+| 服务 | 默认端口 | 本机页面 | 镜像版本 |
+| --- | --- | --- | --- |
+| Antigravity | 8045 | `http://localhost:8045` | `lbjlaq/antigravity-manager:v5.0.3` |
+| WorkBuddy | 7863 | `http://localhost:7863/panel/` | `ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0` |
+| sub2api | 8080 | `http://localhost:8080` | `weishaw/sub2api:0.2.23` |
+| AI Studio（可选） | 7860 | `http://localhost:7860` | `ibuhub/aistudio-to-api:v1.4.1` |
 
-- Windows 10/11 x64，或支持 x64 模拟的 Windows 11 ARM64；使用系统自带的 Windows PowerShell 5.1。
-- 可用的 Docker Linux 引擎和 Docker Compose v2：推荐 [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/)，也支持已配置 Docker 的 WSL 发行版。
-- 能访问 GitHub 发布文件和容器镜像仓库。
+`0.0.0.0` 是监听地址。客户端使用 `localhost` 或主机 IP。
+PostgreSQL / Redis 仅供 Compose 网络中的 sub2api 使用，不发布数据库端口。
 
-脚本会检测 Docker Desktop 与 WSL；已安装的 Docker Desktop 未启动时会尝试启动。**Docker 本身需要先安装好**；脚本不会自动安装 WSL、变更 Windows 虚拟化设置或重启系统。无需安装 Go、Node.js，也无需手工配置数据库。
+## Linux / WSL 一键安装
 
-## 一键安装
+```bash
+git clone https://github.com/dieWehmut/ai-proxy-kit.git
+cd ai-proxy-kit
+bash install.sh all
+```
 
-1. 从 [Releases](https://github.com/dieWehmut/sub2api-windows-installer/releases/latest) 下载脚本 ZIP，解压到任意目录。也可使用 GitHub 的 **Code → Download ZIP**。
-2. 双击 `install-sub2api.cmd`。
-3. 等待安装完成，在自动打开的登录页登录。初始管理员邮箱和随机密码保存在安装目录中的 `LOGIN.txt`。
+`all` 包含前三项服务。首次运行生成独立随机密钥，保存在仅当前用户可读的
+`runtime/stack.env`。账号、程序配置和命名卷均持久化；重跑不重置密钥。
+Python 3 / curl 缺失时，Linux 启动器通过 apt/dnf 安装。
+需要安装 Docker Engine 时，显式使用官方 Linux 安装脚本：
 
-默认安装目录为 `%LOCALAPPDATA%\Sub2API`，本机地址为 <http://127.0.0.1:8080/login>。默认管理员邮箱是 `admin@sub2api.local`；可通过下面的参数自定义。脚本也会创建桌面启动快捷方式。
+```bash
+bash install.sh all --install-docker
+```
 
-首次运行下载官方最新稳定版并验证 SHA-256，下载 Windows 所需的时区数据，然后通过 `AUTO_SETUP=true` 完成数据库迁移和管理员创建。只有健康接口、登录页面及安装状态检查通过，安装器才报告成功；首次安装还会实际验证管理员无验证码登录。
+已有 Docker 必须能使用 `docker compose`。WSL 可复用已有 Linux Docker 或
+Docker Desktop WSL 集成。脚本不更改虚拟化设置或重启 Windows。
+Docker daemon 无法访问镜像源时，会尝试用经过校验的 `crane` 经当前 shell 代理拉取镜像。
+日常启动复用本机镜像，不自动升级。
 
-## 自定义目录、端口和账号
+```bash
+# 单项安装，AI Studio 为可选服务。
+bash install.sh antigravity
+bash install.sh workbuddy
+bash install.sh sub2api
+bash install.sh aistudio
 
-在解压目录的 PowerShell 中运行：
+# 一键启动、停止、状态、检查。
+bash start.sh all
+bash stop.sh all
+bash status.sh
+bash check.sh all
+bash start.sh antigravity --skip-pull
+
+# 指定模型会验证真实生成，而不只检查容器。
+bash check.sh workbuddy --model cn:hy4flash-free
+bash check.sh workbuddy --model cn:hy4flash-free --stream
+bash check.sh antigravity --model gemini-3.8-flash-low
+```
+
+## Windows 一键入口
+
+双击 `install.cmd`、`start.cmd`、`stop.cmd`、`status.cmd`。
+统一入口调用 WSL 中同一套 Linux 脚本；仓库可保存在 Windows 或 WSL UNC 目录。
 
 ```powershell
-.\install-sub2api.ps1 `
-  -InstallDir "D:\Apps\Sub2API" `
-  -Port 8080 `
-  -DatabasePort 5432 `
-  -RedisPort 6379 `
-  -AdminEmail "you@example.com"
+.\proxykit.ps1 -Action install -Service all -Distribution Ubuntu-22.04
+.\proxykit.ps1 -Action start -Service antigravity -Distribution Ubuntu-22.04
+.\proxykit.ps1 -Action status
 ```
 
-从命令提示符运行也可以：
-
-```bat
-install-sub2api.cmd -InstallDir "D:\Apps\Sub2API" -Port 18080 -DatabasePort 15432 -RedisPort 16379
-```
-
-| 参数 | 作用 |
-| --- | --- |
-| `-InstallDir` | 安装目录，支持空格；首次安装必须为空目录 |
-| `-Port` | Sub2API 网页端口，默认 `8080` |
-| `-DatabasePort` / `-RedisPort` | 仅绑定本机的数据库端口，默认 `5432` / `6379` |
-| `-AdminEmail` | 首次创建的管理员邮箱 |
-| `-Version v0.2.23` | 首次安装指定官方版本；默认 `latest` |
-| `-DockerDistribution Ubuntu-22.04` | 明确选择 WSL 发行版；默认自动检测 |
-| `-Architecture amd64` / `arm64` | 明确选择上游提供的 Windows 架构；默认自动检测 |
-| `-NoBrowser` / `-NoShortcut` | 禁止打开浏览器 / 创建桌面快捷方式 |
-
-Windows ARM64 在官方仅提供 amd64 包时使用系统的 x64 模拟运行。明确指定不存在的架构会报错。
-
-## 以后如何启动
-
-双击安装目录中的 `start-sub2api.cmd` 或桌面快捷方式。服务在后台运行，关闭安装窗口不会停止服务。双击 `stop-sub2api.cmd` 停止 Sub2API；数据库、Redis 和持久化数据保留。
-
-服务监听 `0.0.0.0`，启动脚本显示本机登录地址和当前局域网 IPv4 地址。局域网连接仍由 Windows 防火墙规则决定；浏览器访问时使用实际 IP，而不是 `0.0.0.0`。
-
-临时切换网页端口前，先停止实例，再运行：
-
-```bat
-start-sub2api.cmd -Port 18080
-```
-
-这个参数只影响本次启动，不修改保存的默认端口。
-
-## 重复安装与数据
-
-再次运行安装器会复用原来的凭据、程序版本和数据卷，不重置管理员，不启动第二个实例，也不自动升级已安装的版本。安装中断后可以在同一目录重跑。
-
-不同安装目录使用独立的 Docker 项目和命名卷，并保存首次选择的 Docker 引擎或 WSL 发行版，后续启动继续使用同一套数据服务。如果原目录的 `.env` 丢失，但数据卷仍存在，脚本会要求恢复原配置，避免生成与已有数据库不匹配的密码。已有其他方式安装的目录不会被覆盖。
-
-修改管理员密码后，`LOGIN.txt` 中的初始密码不会同步改变；以后请使用自己设置的新密码。
-
-以下文件属于本机运行数据，不应上传到 GitHub：
-
-- `.env`、`config.yaml`、`LOGIN.txt`：含本实例凭据。
-- `.installed`：Sub2API 自动初始化完成后生成的标记。
-- `logs/`、`downloads/`、`sub2api.exe`、`zoneinfo.zip`：运行日志和下载文件。
-
-本仓库的 `.gitignore` 已排除这些文件；公开发布包只包含脚本、文档与 Compose 模板。
-
-## 故障排查
-
-- **Docker 不可用**：打开 Docker Desktop 并切到 Linux containers，或确认 WSL 内的 `docker info` 和 `docker compose version` 可用。
-- **端口占用**：用安装参数选择另一组互不相同的端口；脚本不会停止占用端口的其他程序。
-- **下载失败**：确认网络可访问 GitHub 后重跑。GitHub API 限流时，脚本自动改用官方发布页面和校验和文件，不要求登录 GitHub。也可在当前 PowerShell 进程中设置自己的 `GITHUB_TOKEN`，该值不会写入安装配置。
-- **启动失败**：查看安装目录的 `logs\launcher-error.log`、`logs\sub2api-error.log` 和 `logs\sub2api.log`。
-
-## 验证脚本
-
-不需要 Docker 的语法和函数检查：
+也可以下载 [脚本压缩包](https://github.com/dieWehmut/ai-proxy-kit/archive/refs/heads/main.zip)，
+解压后运行上述入口。制作同时包含 Linux / Windows 脚本的发布 ZIP：
 
 ```powershell
-.\tests\Test-Functions.ps1
+.\tools\Build-Release.ps1 -Version 1.1.0
 ```
 
-在可用的 Windows Docker 环境进行真实安装检查：
+原有 Windows **原生** Sub2API 安装器仍可用：`install-sub2api.cmd` / `start-sub2api.cmd`。
+详见 [原生安装器说明](docs/SUB2API_WINDOWS.md)；它与统一栈属于不同实例，应使用不同端口。
 
-```powershell
-.\tests\Test-Installation.ps1 -Version v0.2.23
+## 首次账号与出站代理
+
+- Antigravity：用 `ANTIGRAVITY_WEB_PASSWORD` 登录并添加账号。启动器自动启用反代和自动启动；新账号先刷新配额。
+- WorkBuddy：进入 `/panel/`，使用 `WORKBUDDY_API_KEY` 管理本人账号。默认关闭积分任务排程。
+- sub2api：用 `SUB2API_EMAIL` / `SUB2API_PASSWORD` 登录。首次在页面确认上游管理员承诺；标准计费模式需要正余额。
+- AI Studio：控制台密码为 `AISTUDIO_WEB_PASSWORD`，API Key 为 `AISTUDIO_API_KEY`；通过控制台 VNC 完成本人 Google 登录。
+
+已有账号可显式接入；Windows 目录在 WSL 下使用 `/mnt/c/`、`/mnt/d/` 路径：
+
+```bash
+bash install.sh all \
+  --import-antigravity /path/to/Antigravity-Manager/docker/.env \
+  --antigravity-data /path/to/idle-antigravity-data \
+  --import-workbuddy /path/to/workbuddy2api \
+  --upstream-proxy http://host.docker.internal:7890 \
+  --workbuddy-env-proxy
 ```
 
-集成检查使用带空格的临时目录和独立端口，验证自动初始化、无验证码管理员登录、重复安装，以及重建容器后管理员和数据库测试记录保留。结束后只清理这个测试实例；`-KeepInstallation` 可保留它供检查。GitHub Actions 在 Windows PowerShell 5.1 和 PowerShell 7 上运行语法、凭据隔离、权限、校验和及参数引用检查。
+`--antigravity-data` 复用指定目录；不要让两个实例同时写同一目录。
+WorkBuddy 导入只复制缺失的 `auths/*.json`，不改源文件。
+容器里的 `127.0.0.1` 是容器本身，出站代理应使用可达的宿主机地址。
+`host.docker.internal` 已配置；WSL 的 Windows 代理也可用 Windows 网关 IP。
 
-## 许可证与来源
+WorkBuddy v1.13.0 的自定义 Transport 未读取代理环境变量。
+`--workbuddy-env-proxy` 下载固定提交并验证 SHA-256，仅补入
+`http.ProxyFromEnvironment` 后编译覆盖层。复用 Go >=1.22.5；缺失时将官方校验过的
+Go 工具链放进 `runtime/toolchain/`，不修改系统 Go。二进制与原许可证留在本机。
 
-安装和启动脚本使用 [MIT License](LICENSE)。Sub2API 程序从 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 官方 Releases 下载，遵循其自身许可证，安装目录中保留 `SUB2API-LICENSE`。Docker 镜像及 [Go 时区数据](https://github.com/golang/go/tree/go1.24.0/lib/time) 遵循各自的许可证。
+## 添加到 sub2api
+
+```bash
+# 首次先在 sub2api 页面完成管理员确认。
+bash connect.sh
+# 创建/复用该上游的调用 Key，再验证真实转发。
+bash connect.sh --provider workbuddy --test --model cn:hy4flash-free
+bash connect.sh --provider workbuddy --test --model cn:hy4flash-free --stream
+bash connect.sh --provider antigravity --test --model gemini-3.8-flash-low
+# 明确同意上游文档后，可非交互提交确认。
+bash connect.sh --acknowledge-compliance
+```
+
+为两条本地网关分别创建 **OpenAI / API Key** 账号和独立分组，固定 Chat Completions
+协议，Compose 内通过服务名连接。重复运行复用原账号、分组和调用 Key。
+读回 ID 和调用 Key 保存在 `runtime/sub2api-connections.json`，不输出凭据。
+
+接入其他 sub2api 可设置 `SUB2API_BASE_URL` 和 `SUB2API_JWT` / `SUB2API_ADMIN_API_KEY`；
+或把 `SUB2API_EMAIL` / `SUB2API_PASSWORD` 写进被忽略的 `.env.sub2api.local`。
+创建用户调用 Key 做 `--test` 需要 JWT 或邮箱/密码。
+上游不在同一个 Compose 网络时，单项指定 `--provider antigravity --upstream-url http://实际IP:8045`。
+
+## 端口、数据和验证
+
+```bash
+# 本机已有实例时换一组端口；仍全部发布到 0.0.0.0。
+bash install.sh all --antigravity-port 18045 --workbuddy-port 17863 --sub2api-port 18080
+python3 -m unittest discover -s tests -p 'test_*.py'
+bash -n *.sh
+```
+
+端口冲突时不会停止其他程序。停止命令不删除数据。迁移时同时备份 `runtime/` 和
+sub2api 的 Docker 命名卷；只复制脚本不会迁移账号。
+WSL2 NAT 下，从局域网经 Windows IP 访问仍取决于 Windows 转发和防火墙。
+
+GitHub Actions 检查 Linux 配置、凭据保留、网关绑定地址，以及 Windows PowerShell 5.1 / 7。
+真实结果见 [WSL 验收记录](docs/VALIDATION.md)。AI Studio 的选择依据见 [方案比较](docs/AISTUDIO_COMPARISON.md)。
+
+## 来源
+
+本仓库脚本沿用 [MIT](LICENSE)。上游程序分别来自
+[Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)、
+[WorkBuddy2API Panel](https://github.com/linguo2625469/workbuddy2api-panel)、
+[Sub2API](https://github.com/Wei-Shaw/sub2api)、[AIStudioToAPI](https://github.com/iBUHub/AIStudioToAPI)，
+各自遵循其许可证。其中 AIStudioToAPI 使用 CC BY-NC 4.0；部署入口不改变上游授权。
