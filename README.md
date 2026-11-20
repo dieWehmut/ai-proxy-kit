@@ -116,11 +116,15 @@ bash connect.sh
 bash connect.sh --provider workbuddy --test --model cn:hy4flash-free
 bash connect.sh --provider workbuddy --test --model cn:hy4flash-free --stream
 bash connect.sh --provider antigravity --test --model gemini-3.8-flash-low
+# AI Studio 安装后可先接入；完成 Google 登录后再执行 --test。
+bash connect.sh --provider aistudio
+bash connect.sh --provider aistudio --test
 # 明确同意上游文档后，可非交互提交确认。
 bash connect.sh --acknowledge-compliance
 ```
 
-为两条本地网关分别创建 **OpenAI / API Key** 账号和独立分组，固定 Chat Completions
+默认为 Antigravity、WorkBuddy 分别创建 **OpenAI / API Key** 账号和独立分组；
+AI Studio 用 `--provider aistudio` 单独接入。固定 Chat Completions
 协议，Compose 内通过服务名连接。重复运行复用原账号、分组和调用 Key。
 读回 ID 和调用 Key 保存在 `runtime/sub2api-connections.json`，不输出凭据。
 
