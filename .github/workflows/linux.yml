@@ -1,0 +1,23 @@
+name: Linux script checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh start.sh stop.sh status.sh check.sh
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - run: bash install.sh --prepare-only
+      - name: Validate all gateway bindings
+        run: |
+          docker compose --env-file runtime/stack.env --profile '*' config --format json > /tmp/proxy-kit-compose.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/proxy-kit-compose.json'))
+          for name in ('antigravity','workbuddy','sub2api','aistudio'):
+              assert all(p['host_ip']=='0.0.0.0' for p in d['services'][name]['ports'])
+          for name in ('postgres','redis'):
+              assert not d['services'][name].get('ports')
+          PY

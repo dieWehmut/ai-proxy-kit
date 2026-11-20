@@ -16,3 +16,8 @@ data/
 backups/
 dist/
 test-results/
+runtime/
+.env.sub2api.local
+__pycache__/
+*.pyc
+.venv/
