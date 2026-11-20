@@ -271,7 +271,38 @@ def enable_antigravity(values):
     print(f"Antigravity API enabled; {state.get('active_accounts', 0)} active account(s).", flush=True)
 
 
-def check(name, values, model=None):
+def verify_generation(base, key, model, stream=False):
+    payload = {"model": model, "messages": [{"role": "user", "content": "Reply with exactly PROXY_KIT_OK and nothing else."}],
+               "max_tokens": 2048, "stream": stream}
+    if stream:
+        req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(payload).encode(),
+            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        parts, done = [], False
+        with HTTP.open(req, timeout=120) as response:
+            for line in response:
+                line = line.decode().strip()
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if raw == "[DONE]":
+                    done = True
+                    break
+                event = json.loads(raw)
+                if "error" in event:
+                    raise ValueError("Upstream returned an error inside the stream")
+                for choice in event.get("choices", []):
+                    parts.append(choice.get("delta", {}).get("content") or "")
+        if not done:
+            raise ValueError("Generation stream ended without [DONE]")
+        content = "".join(parts)
+    else:
+        data = request(base + "/v1/chat/completions", key, payload, timeout=120)
+        content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+    if content.strip() != "PROXY_KIT_OK":
+        raise ValueError("Generation did not return the verification marker (check model quota and output budget)")
+
+
+def check(name, values, model=None, stream=False):
     wait_service(name, values, seconds=10)
     if name == "sub2api":
         print("sub2api health: PASS (use scripts/connect-sub2api.py --test to test routed generation)")
@@ -291,13 +322,8 @@ def check(name, values, model=None):
     models = request(base + "/v1/models", key).get("data", [])
     print(f"{name}: auth PASS; {len(models)} model(s).", flush=True)
     if model:
-        payload = {"model": model, "messages": [{"role": "user", "content": "Reply with exactly PROXY_KIT_OK."}],
-                   "max_tokens": 256, "stream": False}
-        data = request(base + "/v1/chat/completions", key, payload, timeout=120)
-        content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
-        if content.strip() != "PROXY_KIT_OK":
-            raise ValueError(f"{name} generation did not return the verification marker")
-        print(f"{name}: real generation PASS (PROXY_KIT_OK)", flush=True)
+        verify_generation(base, key, model, stream)
+        print(f"{name}: real {'streaming' if stream else 'non-streaming'} generation PASS (PROXY_KIT_OK)", flush=True)
 
 
 def main():
@@ -314,6 +340,7 @@ def main():
     parser.add_argument("--import-workbuddy", type=pathlib.Path, help="Copy auths/*.json from an existing WorkBuddy install")
     parser.add_argument("--upstream-proxy", help="Optional outbound proxy reachable from the containers")
     parser.add_argument("--model", help="check: additionally make a real generation request")
+    parser.add_argument("--stream", action="store_true", help="check: verify content and [DONE] in a real SSE response")
     for name in (*SERVICES, "aistudio"):
         parser.add_argument("--" + name + "-port", type=int)
     args = parser.parse_args()
@@ -333,7 +360,7 @@ def main():
         values = read_env(args.env_file)
     if args.command == "check":
         for name in services:
-            check(name, values, args.model)
+            check(name, values, args.model, args.stream)
         return
     docker = docker_command()
     compose(docker, args, values, "config", "--quiet")
@@ -348,7 +375,8 @@ def main():
             print(f"{name}: listening on 0.0.0.0:{values[name.upper() + '_PORT']}; local URL {service_url(name, values)}", flush=True)
         print(f"Credentials stay in {args.env_file}; no secrets are printed.", flush=True)
     elif args.command == "stop":
-        compose(docker, args, values, "stop", *services)
+        dependencies = ["postgres", "redis"] if "sub2api" in services else []
+        compose(docker, args, values, "stop", *services, *dependencies)
     else:
         compose(docker, args, values, "--profile", "*", "ps", "--all")
 

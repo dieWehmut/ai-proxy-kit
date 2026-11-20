@@ -119,6 +119,10 @@ services:
       PORT: "7860"
       WEB_CONSOLE_PASSWORD: ${AISTUDIO_WEB_PASSWORD:?Run install.sh first}
       TZ: ${TZ:-Asia/Shanghai}
+      HTTP_PROXY: ${UPSTREAM_PROXY:-}
+      HTTPS_PROXY: ${UPSTREAM_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,::1,antigravity,workbuddy,sub2api
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./runtime/aistudio/auth:/app/configs/auth
       - ./runtime/aistudio/data:/app/data

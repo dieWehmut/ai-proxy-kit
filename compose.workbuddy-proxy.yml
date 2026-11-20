@@ -1,0 +1,4 @@
+services:
+  workbuddy:
+    volumes:
+      - ./runtime/workbuddy/wb2api-proxy:/app/wb2api:ro
