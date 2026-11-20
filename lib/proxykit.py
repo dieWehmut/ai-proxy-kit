@@ -234,15 +234,13 @@ def service_url(name, values):
 
 def wait_service(name, values, seconds=180):
     base = service_url(name, values)
-    path = "/healthz" if name == "workbuddy" else "/health" if name != "aistudio" else "/"
+    path = "/healthz" if name == "workbuddy" else "/health"
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
             req = urllib.request.Request(base + path)
             with HTTP.open(req, timeout=3) as response:
                 raw = response.read()
-                if name == "aistudio":
-                    return
                 data = json.loads(raw)
                 if (name == "workbuddy" and data.get("service") == "workbuddy2api") or data.get("status") == "ok":
                     return
@@ -307,9 +305,6 @@ def check(name, values, model=None, stream=False):
     if name == "sub2api":
         print("sub2api health: PASS (use scripts/connect-sub2api.py --test to test routed generation)")
         return
-    if name == "aistudio":
-        print("AI Studio web/API listener: PASS; Google login is completed through its Web/VNC UI.")
-        return
     key = values[name.upper() + "_API_KEY"]
     base = service_url(name, values)
     try:
@@ -321,6 +316,9 @@ def check(name, values, model=None, stream=False):
         raise ValueError(f"{name} did not reject an unauthenticated model-list request")
     models = request(base + "/v1/models", key).get("data", [])
     print(f"{name}: auth PASS; {len(models)} model(s).", flush=True)
+    if name == "aistudio":
+        health = request(base + "/health")
+        print(f"AI Studio browserConnected={health.get('browserConnected')}; complete Google login in its Web/VNC UI.", flush=True)
     if model:
         verify_generation(base, key, model, stream)
         print(f"{name}: real {'streaming' if stream else 'non-streaming'} generation PASS (PROXY_KIT_OK)", flush=True)

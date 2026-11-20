@@ -1,6 +1,7 @@
 """Regression checks for credential preservation and safe command construction."""
 import argparse
 import importlib.util
+import io
 import json
 import pathlib
 import stat
@@ -69,6 +70,29 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text("TOKEN=a\nTOKEN=b\n")
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 kit.read_env(path)
+
+
+class GenerationChecks(unittest.TestCase):
+    def opener(self, payload):
+        return mock.Mock(open=mock.Mock(return_value=io.BytesIO(payload)))
+
+    def test_stream_requires_content_and_termination(self):
+        data = b'data: {"choices":[{"delta":{"content":"PROXY_"}}]}\n\ndata: {"choices":[{"delta":{"content":"KIT_OK"}}]}\n\ndata: [DONE]\n'
+        with mock.patch.object(kit, "HTTP", self.opener(data)):
+            kit.verify_generation("http://local-gateway", "fixture-key", "model", stream=True)
+        with mock.patch.object(kit, "HTTP", self.opener(data.replace(b'data: [DONE]\n', b''))):
+            with self.assertRaisesRegex(ValueError, "without \\[DONE\\]"):
+                kit.verify_generation("http://local-gateway", "fixture-key", "model", stream=True)
+
+    def test_error_or_thinking_only_stream_cannot_pass(self):
+        error = b'data: {"error":{"message":"upstream refused"}}\n\ndata: [DONE]\n'
+        with mock.patch.object(kit, "HTTP", self.opener(error)):
+            with self.assertRaisesRegex(ValueError, "error inside the stream"):
+                kit.verify_generation("http://local-gateway", "fixture-key", "model", stream=True)
+        empty = b'data: {"choices":[{"delta":{"reasoning_content":"thinking only"}}]}\n\ndata: [DONE]\n'
+        with mock.patch.object(kit, "HTTP", self.opener(empty)):
+            with self.assertRaisesRegex(ValueError, "verification marker"):
+                kit.verify_generation("http://local-gateway", "fixture-key", "model", stream=True)
 
 
 if __name__ == "__main__":
