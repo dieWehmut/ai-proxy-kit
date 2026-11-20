@@ -1,5 +1,6 @@
 """Regression checks for credential preservation and safe command construction."""
 import argparse
+import hashlib
 import importlib.util
 import io
 import json
@@ -13,6 +14,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("proxykit", ROOT / "lib/proxykit.py")
 kit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(kit)
+build_spec = importlib.util.spec_from_file_location("workbuddy_build", ROOT / "tools/build-workbuddy-proxy.py")
+workbuddy_build = importlib.util.module_from_spec(build_spec)
+build_spec.loader.exec_module(workbuddy_build)
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -70,6 +74,28 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text("TOKEN=a\nTOKEN=b\n")
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 kit.read_env(path)
+
+    def test_workbuddy_build_retains_configuration_edited_while_checking_binary(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(kit, "ROOT", pathlib.Path(folder)), \
+                mock.patch.object(workbuddy_build, "proxykit", kit):
+            root = pathlib.Path(folder)
+            env_file = root / "runtime/stack.env"
+            kit.save_env(env_file, {"AISTUDIO_IMAGE": "fixture:old", "WORKBUDDY_ENV_PROXY_PATCH": "false"})
+            binary = root / "runtime/workbuddy/wb2api-proxy"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"fixture binary")
+            sha256 = hashlib.sha256
+            binary.with_suffix(".json").write_text(json.dumps({
+                "commit": workbuddy_build.COMMIT, "binary_sha256": sha256(binary.read_bytes()).hexdigest()}))
+
+            def change_configuration_during_verification(data):
+                kit.save_env(env_file, {"AISTUDIO_IMAGE": "fixture:updated", "WORKBUDDY_ENV_PROXY_PATCH": "false"})
+                return sha256(data)
+
+            with mock.patch.object(workbuddy_build.hashlib, "sha256", side_effect=change_configuration_during_verification):
+                workbuddy_build.build(env_file)
+            self.assertEqual(kit.read_env(env_file), {
+                "AISTUDIO_IMAGE": "fixture:updated", "WORKBUDDY_ENV_PROXY_PATCH": "true"})
 
 
 class GenerationChecks(unittest.TestCase):

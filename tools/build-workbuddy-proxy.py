@@ -57,14 +57,14 @@ def go_binary():
 
 
 def build(env_file):
-    values = proxykit.read_env(env_file)
+    if not proxykit.read_env(env_file):
+        raise ValueError("Run install.sh --prepare-only before building the optional patch")
     binary = proxykit.ROOT / "runtime/workbuddy/wb2api-proxy"
     receipt_path = binary.with_suffix(".json")
     if binary.is_file() and receipt_path.is_file():
         receipt = json.loads(receipt_path.read_text())
         if receipt.get("commit") == COMMIT and hashlib.sha256(binary.read_bytes()).hexdigest() == receipt.get("binary_sha256"):
-            values["WORKBUDDY_ENV_PROXY_PATCH"] = "true"
-            proxykit.save_env(env_file, values)
+            enable_patch(env_file)
             print("Reusing verified WorkBuddy environment-proxy binary.")
             return
     archive_cache = pathlib.Path.home() / ".cache/ai-proxy-kit/workbuddy-v1.13.0.tar.gz"
@@ -104,9 +104,15 @@ def build(env_file):
             proxykit.private_write(binary.parent / "WORKBUDDY-LICENSE", inp.read().decode())
     proxykit.private_write(receipt_path, json.dumps({"commit": COMMIT, "source_sha256": SOURCE_SHA256,
         "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "patch": "http.Transport.Proxy = http.ProxyFromEnvironment"}, indent=2))
-    values["WORKBUDDY_ENV_PROXY_PATCH"] = "true"
-    proxykit.save_env(env_file, values)
+    enable_patch(env_file)
     print("Built WorkBuddy with HTTP_PROXY/HTTPS_PROXY/NO_PROXY support; restart workbuddy to activate.")
+
+
+def enable_patch(env_file):
+    # Compilation/downloads can take minutes. Preserve changes made while they ran.
+    current = proxykit.read_env(env_file)
+    current["WORKBUDDY_ENV_PROXY_PATCH"] = "true"
+    proxykit.save_env(env_file, current)
 
 
 if __name__ == "__main__":
