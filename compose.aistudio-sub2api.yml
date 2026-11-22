@@ -1,0 +1,9 @@
+# Attach only AI Studio to an existing Sub2API network. Use with compose.yml.
+services:
+  aistudio:
+    networks: [sub2api]
+
+networks:
+  sub2api:
+    external: true
+    name: ${SUB2API_DOCKER_NETWORK:-sub2api_sub2api-network}
