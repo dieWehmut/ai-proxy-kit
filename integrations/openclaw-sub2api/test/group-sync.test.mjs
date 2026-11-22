@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -166,4 +167,86 @@ test('a failed atomic config update cannot replace the known usable snapshot', a
   await client.refresh(); fail = true;
   assert.equal((await client.refresh({ fresh: true })).model.id, 'old');
   assert.equal(client.lastError.code, 'config-changed');
+});
+
+test('same-target refresh preserves user model options and provider-wide policy', () => {
+  const old = config(); const snapshot = normalizeMetadata(fixture('old-model', 'cn:old-model'));
+  const options = { alias: 'My DeepSeek', params: { temperature: 0.3, maxTokens: 64000 }, agentRuntime: 'pi' };
+  old.agents.defaults.models['sub2api/old-model'] = options;
+  old.agents.defaults.models['sub2api/*'] = { params: { cacheRetention: 'long' } };
+  old.models.providers.sub2api.models[0].maxTokens = 128000;
+  old.models.providers.sub2api.models[0].contextWindow = 1000000;
+  const next = updateConfig(old, snapshot, 'http://sub2api/v1', snapshot);
+  assert.deepEqual(next.agents.defaults.models['sub2api/old-model'], options);
+  assert.deepEqual(next.agents.defaults.models['sub2api/*'], { params: { cacheRetention: 'long' } });
+  assert.equal(next.models.providers.sub2api.models[0].maxTokens, 128000);
+  assert.equal(next.models.providers.sub2api.models[0].contextWindow, 1000000);
+  const different = normalizeMetadata(fixture('new-model', 'cn:new-model'));
+  const changed = updateConfig(old, different, 'http://sub2api/v1', snapshot);
+  assert.deepEqual(changed.agents.defaults.models['sub2api/new-model'], { alias: 'new-model' });
+  assert.equal(changed.agents.defaults.models['sub2api/old-model'], undefined);
+});
+
+test('independent clients cannot let an old background response roll back new config or cache', async (t) => {
+  const { statePath, configPath } = setup(t); writeFileSync(configPath, JSON.stringify(config()));
+  let releaseOld; let startedOld;
+  const started = new Promise((resolve) => { startedOld = resolve; });
+  const delayed = new Promise((resolve) => { releaseOld = resolve; });
+  const options = { baseUrl: 'http://sub2api/v1', key: 'fixture-key', statePath,
+    onSnapshot: (snapshot, previous) => writeOpenClawConfig(configPath, snapshot, 'http://sub2api/v1', previous) };
+  const backgroundClient = new KeyGroupClient({ ...options, fetchImpl: async () => {
+    startedOld(); return await delayed;
+  } });
+  const oldRequest = backgroundClient.refresh(); await started;
+  const turnClient = new KeyGroupClient({ ...options, fetchImpl: async () => ({
+    ok: true, json: async () => fixture('new-model', 'cn:new-model', 9),
+  }) });
+  assert.equal((await turnClient.refresh({ fresh: true })).model.id, 'new-model');
+  releaseOld({ ok: true, json: async () => fixture('old-model', 'cn:old-model', 8) });
+  assert.equal((await oldRequest).model.id, 'new-model');
+  assert.equal(JSON.parse(readFileSync(configPath)).agents.defaults.model.primary, 'sub2api/new-model');
+  const stored = JSON.parse(readFileSync(statePath));
+  assert.equal(stored.model.id, 'new-model'); assert.equal(stored.generation, 2);
+  assert.equal(new KeyGroupClient(options).current.model.id, 'new-model');
+});
+
+test('separate Node processes share ordered commits, including a late old response', { timeout: 10000 }, async (t) => {
+  const { statePath, configPath } = setup(t); writeFileSync(configPath, JSON.stringify(config()));
+  const moduleUrl = new URL('../group-sync.mjs', import.meta.url).href;
+  const program = [
+    'import { KeyGroupClient, writeOpenClawConfig } from ' + JSON.stringify(moduleUrl) + ';',
+    'const response = JSON.parse(process.env.GROUP_SYNC_RESPONSE);',
+    'const client = new KeyGroupClient({baseUrl:"http://sub2api/v1",key:"fixture-key",statePath:process.env.GROUP_SYNC_STATE_PATH,',
+    'onSnapshot:(snapshot,previous)=>writeOpenClawConfig(process.env.GROUP_SYNC_CONFIG_PATH,snapshot,"http://sub2api/v1",previous),',
+    'fetchImpl:async()=>{if(process.env.GROUP_SYNC_HOLD==="1"){process.stdout.write("READY\\n");process.stdin.resume();await new Promise(resolve=>process.stdin.once("end",resolve));}return {ok:true,json:async()=>response};}});',
+    'const result=await client.refresh({fresh:process.env.GROUP_SYNC_HOLD!=="1"});',
+    'console.log(JSON.stringify({model:result.model.id,generation:result.generation}));',
+  ].join('\n');
+  const children = [];
+  t.after(() => { for (const child of children) if (child.exitCode === null) child.kill('SIGTERM'); });
+  const start = (response, hold) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', program], { env: {
+      ...process.env, GROUP_SYNC_STATE_PATH: statePath, GROUP_SYNC_CONFIG_PATH: configPath,
+      GROUP_SYNC_RESPONSE: JSON.stringify(response), GROUP_SYNC_HOLD: hold ? '1' : '0',
+    }, stdio: ['pipe', 'pipe', 'pipe'] });
+    children.push(child); let output = ''; let error = ''; let readyResolve; let readyReject;
+    const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); if (output.includes('READY\n')) readyResolve(); });
+    child.stderr.on('data', (chunk) => { error += chunk.toString(); });
+    const done = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => {
+        if (code !== 0) { const reason = new Error('Child failed: ' + error); readyReject(reason); reject(reason); }
+        else resolve(JSON.parse(output.trim().split('\n').at(-1)));
+      });
+    });
+    return { child, ready, done };
+  };
+  const old = start(fixture('old-model', 'cn:old-model', 8), true); await old.ready;
+  const current = start(fixture('new-model', 'cn:new-model', 9), false);
+  assert.equal((await current.done).model, 'new-model');
+  old.child.stdin.end();
+  assert.equal((await old.done).model, 'new-model');
+  assert.equal(JSON.parse(readFileSync(statePath)).model.id, 'new-model');
+  assert.equal(JSON.parse(readFileSync(configPath)).agents.defaults.model.primary, 'sub2api/new-model');
 });

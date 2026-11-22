@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -86,7 +87,7 @@ export function runtimeModel(snapshot, baseUrl) {
     reasoning: typeof model.reasoning === 'boolean' ? model.reasoning : deepseek,
     input: model.input ?? (deepseek ? ['text', 'image'] : ['text']),
     contextWindow: positiveInteger(model.context_window, deepseek ? 1000000 : 128000),
-    maxTokens: positiveInteger(model.max_tokens, deepseek ? 32768 : 8192),
+    maxTokens: positiveInteger(model.max_tokens, deepseek ? 128000 : 8192),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: deepseek ? {
       supportsReasoningEffort: true,
@@ -113,15 +114,65 @@ export function privateWrite(path, value, expected) {
   }
 }
 
-export function updateConfig(config, snapshot, baseUrl) {
+// Python is already installed on the Linux OpenClaw hosts. Kernel flock releases
+// on process/pipe closure, so crashed owners never leave a guessed stale lock.
+const LOCK_PROGRAM = [
+  'import fcntl, os, sys',
+  'path = sys.argv[1]',
+  'os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)',
+  'fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)',
+  'with os.fdopen(fd, "a+") as lock:',
+  '    fcntl.flock(lock, fcntl.LOCK_EX)',
+  '    sys.stdout.write("LOCKED\\n")',
+  '    sys.stdout.flush()',
+  '    sys.stdin.buffer.read()',
+].join('\n');
+
+export async function withFileLock(path, operation) {
+  const child = spawn('python3', ['-c', LOCK_PROGRAM, path], { stdio: ['pipe', 'pipe', 'ignore'] });
+  child.stdin.on('error', () => {});
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  let timeout;
+  const acquired = new Promise((resolve, reject) => {
+    let output = '';
+    let ready = false;
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+      if (output.includes('LOCKED\n') && !ready) { ready = true; resolve(); }
+    });
+    child.once('error', () => reject(new DiscoveryError('coordination-unavailable', 'Model state coordination is unavailable')));
+    child.once('close', () => { if (!ready) reject(new DiscoveryError('coordination-unavailable', 'Model state coordination exited before acquiring its lock')); });
+    timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new DiscoveryError('coordination-timeout', 'Timed out coordinating model state'));
+    }, 10000);
+  });
+  try {
+    await acquired;
+    clearTimeout(timeout);
+    return await operation();
+  } finally {
+    clearTimeout(timeout);
+    child.stdin.end();
+    await closed;
+  }
+}
+
+export function updateConfig(config, snapshot, baseUrl, previousSnapshot) {
   const next = structuredClone(config);
   const provider = next.models?.providers?.sub2api;
   if (!provider) throw new DiscoveryError('unmanaged-config', 'The Sub2API provider is not configured');
   const definition = runtimeModel(snapshot, baseUrl);
   const { provider: unusedProvider, baseUrl: inferenceBase, api, ...entry } = definition;
+  const sameTarget = !previousSnapshot ||
+    (previousSnapshot.model.upstream_model === snapshot.model.upstream_model &&
+      previousSnapshot.group.platform === snapshot.group.platform);
+  const oldEntry = sameTarget && provider.models?.find((model) => model.id === snapshot.model.id ||
+    model.id === previousSnapshot?.model.id);
   provider.baseUrl = inferenceBase;
   provider.api = api;
-  provider.models = [entry];
+  provider.models = [{ ...(oldEntry || entry), id: entry.id, api,
+    ...(!oldEntry ? entry : {}) }];
   const defaults = next.agents?.defaults;
   if (!defaults) throw new DiscoveryError('unmanaged-config', 'OpenClaw agent defaults are missing');
   const primary = typeof defaults.model === 'string' ? defaults.model : defaults.model?.primary;
@@ -129,10 +180,12 @@ export function updateConfig(config, snapshot, baseUrl) {
     const ref = 'sub2api/' + snapshot.model.id;
     defaults.model = { ...((typeof defaults.model === 'object' && defaults.model) || {}), primary: ref, fallbacks: [] };
     defaults.models ??= {};
+    const oldRef = previousSnapshot?.model.id && 'sub2api/' + previousSnapshot.model.id;
+    const selectedOptions = sameTarget ? (defaults.models[ref] ?? (oldRef && defaults.models[oldRef])) : undefined;
     for (const id of Object.keys(defaults.models)) {
-      if (id.startsWith('sub2api/')) delete defaults.models[id];
+      if (id.startsWith('sub2api/') && id !== 'sub2api/*') delete defaults.models[id];
     }
-    defaults.models[ref] = { alias: snapshot.model.id };
+    defaults.models[ref] = selectedOptions ?? { alias: snapshot.model.id };
     if (defaults.modelPolicy?.allow) {
       defaults.modelPolicy.allow = [
         ...defaults.modelPolicy.allow.filter((id) => !id.startsWith('sub2api/')),
@@ -143,10 +196,10 @@ export function updateConfig(config, snapshot, baseUrl) {
   return next;
 }
 
-export function writeOpenClawConfig(path, snapshot, baseUrl) {
+export function writeOpenClawConfig(path, snapshot, baseUrl, previousSnapshot) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const previous = readFileSync(path, 'utf8');
-    const next = updateConfig(JSON.parse(previous), snapshot, baseUrl);
+    const next = updateConfig(JSON.parse(previous), snapshot, baseUrl, previousSnapshot);
     const text = JSON.stringify(next, null, 2) + '\n';
     if (JSON.stringify(JSON.parse(previous)) === JSON.stringify(next)) return false;
     try {
@@ -176,6 +229,7 @@ export class KeyGroupClient {
     this.inFlight = undefined;
     this.lastError = undefined;
     this.lastWarning = 0;
+    this.generation = 0;
     this.readState();
   }
 
@@ -189,7 +243,8 @@ export class KeyGroupClient {
         key: { id: state.key_id, group_id: state.group?.id },
         group: state.group, models: [state.model], revision: state.revision,
       };
-      this.current = { ...normalizeMetadata(raw, state.model?.id), checked_at: state.checked_at };
+      this.current = { ...normalizeMetadata(raw, state.model?.id), checked_at: state.checked_at,
+        generation: positiveInteger(state.generation, 0) };
     } catch {
       // A malformed cache never prevents a fresh discovery or leaks credentials.
       this.current = undefined;
@@ -201,6 +256,33 @@ export class KeyGroupClient {
     privateWrite(this.statePath, JSON.stringify({
       ...this.current, fingerprint: this.fingerprint, base_url: this.baseUrl,
     }, null, 2) + '\n');
+  }
+
+  async beginRequest() {
+    if (!this.statePath) return ++this.generation;
+    return await withFileLock(this.statePath + '.lock', () => {
+      const path = this.statePath + '.sequence.json';
+      let sequence = 0;
+      try { sequence = positiveInteger(JSON.parse(readFileSync(path, 'utf8')).generation, 0); } catch {}
+      this.readState();
+      const generation = Math.max(sequence, this.current?.generation ?? 0) + 1;
+      privateWrite(path, JSON.stringify({ generation }) + '\n');
+      return generation;
+    });
+  }
+
+  async commit(snapshot, generation) {
+    const apply = async () => {
+      // Every process rereads the same committed state while holding the lock.
+      if (this.statePath) this.readState();
+      if ((this.current?.generation ?? 0) > generation) return this.current;
+      await this.onSnapshot(snapshot, this.current);
+      this.current = { ...snapshot, generation };
+      this.lastError = undefined;
+      this.writeState();
+      return this.current;
+    };
+    return this.statePath ? await withFileLock(this.statePath + '.lock', apply) : await apply();
   }
 
   async refresh({ fresh = false } = {}) {
@@ -218,19 +300,17 @@ export class KeyGroupClient {
   async discover() {
     try {
       if (!this.key) throw new DiscoveryError('missing-key', 'Sub2API API key is not configured');
+      const generation = await this.beginRequest();
       const response = await this.fetchImpl(metadataUrl(this.baseUrl), {
         headers: { Authorization: 'Bearer ' + this.key, Accept: 'application/json' },
+        cache: 'no-store',
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!response.ok) throw new DiscoveryError('http-' + response.status, 'Key group discovery returned HTTP ' + response.status);
       const snapshot = normalizeMetadata(await response.json(), this.current?.model.id ?? this.preferredAlias);
       transportFor(snapshot.group.platform, this.baseUrl);
       snapshot.checked_at = new Date(this.now()).toISOString();
-      await this.onSnapshot(snapshot);
-      this.current = snapshot;
-      this.lastError = undefined;
-      this.writeState();
-      return this.current;
+      return await this.commit(snapshot, generation);
     } catch (error) {
       // Do not include fetch exception text, URLs or server bodies in diagnostics.
       const code = error instanceof DiscoveryError ? error.code : 'discovery-unavailable';
