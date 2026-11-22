@@ -100,14 +100,17 @@ export function runtimeModel(snapshot, baseUrl) {
 }
 
 /** Atomic replacement plus a compare-before-replace check protects user edits. */
-export function privateWrite(path, value, expected) {
+export function privateWrite(path, value, expected, assertCurrent = () => {}) {
+  assertCurrent();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = path + '.tmp-' + randomUUID();
   try {
     writeFileSync(temp, value, { mode: 0o600, flag: 'wx' });
+    assertCurrent();
     if (expected !== undefined && readFileSync(path, 'utf8') !== expected) {
       throw new DiscoveryError('config-changed', 'OpenClaw configuration changed during synchronization');
     }
+    assertCurrent();
     renameSync(temp, path);
   } finally {
     if (existsSync(temp)) unlinkSync(temp);
@@ -133,6 +136,24 @@ export async function withFileLock(path, operation) {
   child.stdin.on('error', () => {});
   const closed = new Promise((resolve) => child.once('close', resolve));
   let timeout;
+  let lost = false;
+  let identity;
+  const processIdentity = () => {
+    const raw = readFileSync('/proc/' + child.pid + '/stat', 'utf8');
+    const fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+    if (fields[0] === 'Z' || fields[0] === 'X' || Number(fields[1]) !== process.pid) {
+      throw new Error('Lock worker is not a live child');
+    }
+    return fields[19];
+  };
+  const assertCurrent = () => {
+    try {
+      if (lost || child.exitCode !== null || !identity || processIdentity() !== identity) throw new Error('Lock worker exited');
+    } catch {
+      throw new DiscoveryError('coordination-lost', 'The model state lock is no longer held');
+    }
+  };
+  assertCurrent.workerPid = child.pid;
   const acquired = new Promise((resolve, reject) => {
     let output = '';
     let ready = false;
@@ -141,7 +162,10 @@ export async function withFileLock(path, operation) {
       if (output.includes('LOCKED\n') && !ready) { ready = true; resolve(); }
     });
     child.once('error', () => reject(new DiscoveryError('coordination-unavailable', 'Model state coordination is unavailable')));
-    child.once('close', () => { if (!ready) reject(new DiscoveryError('coordination-unavailable', 'Model state coordination exited before acquiring its lock')); });
+    child.once('close', () => {
+      lost = true;
+      if (!ready) reject(new DiscoveryError('coordination-unavailable', 'Model state coordination exited before acquiring its lock'));
+    });
     timeout = setTimeout(() => {
       child.kill('SIGTERM');
       reject(new DiscoveryError('coordination-timeout', 'Timed out coordinating model state'));
@@ -150,7 +174,11 @@ export async function withFileLock(path, operation) {
   try {
     await acquired;
     clearTimeout(timeout);
-    return await operation();
+    try { identity = processIdentity(); } catch { assertCurrent(); }
+    assertCurrent();
+    const result = await operation(assertCurrent);
+    assertCurrent();
+    return result;
   } finally {
     clearTimeout(timeout);
     child.stdin.end();
@@ -196,14 +224,14 @@ export function updateConfig(config, snapshot, baseUrl, previousSnapshot) {
   return next;
 }
 
-export function writeOpenClawConfig(path, snapshot, baseUrl, previousSnapshot) {
+export function writeOpenClawConfig(path, snapshot, baseUrl, previousSnapshot, assertCurrent = () => {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const previous = readFileSync(path, 'utf8');
     const next = updateConfig(JSON.parse(previous), snapshot, baseUrl, previousSnapshot);
     const text = JSON.stringify(next, null, 2) + '\n';
     if (JSON.stringify(JSON.parse(previous)) === JSON.stringify(next)) return false;
     try {
-      privateWrite(path, text, previous);
+      privateWrite(path, text, previous, assertCurrent);
       return true;
     } catch (error) {
       if (error.code !== 'config-changed' || attempt === 2) throw error;
@@ -213,12 +241,13 @@ export function writeOpenClawConfig(path, snapshot, baseUrl, previousSnapshot) {
 
 /** One key-scoped interface for network discovery, persistence and fallback. */
 export class KeyGroupClient {
-  constructor({ baseUrl, key, statePath, fetchImpl = fetch, logger = console,
+  constructor({ baseUrl, key, statePath, configPath, fetchImpl = fetch, logger = console,
     timeoutMs = 4000, now = () => Date.now(), preferredAlias, onSnapshot = () => {} }) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.key = key;
     this.fingerprint = keyFingerprint(key);
     this.statePath = statePath;
+    this.configPath = configPath;
     this.fetchImpl = fetchImpl;
     this.logger = logger;
     this.timeoutMs = timeoutMs;
@@ -230,13 +259,17 @@ export class KeyGroupClient {
     this.lastError = undefined;
     this.lastWarning = 0;
     this.generation = 0;
+    this.enrolledGeneration = undefined;
+    this.superseded = false;
     this.readState();
   }
 
   readState() {
     if (!this.statePath || !existsSync(this.statePath)) return;
     try {
-      const state = JSON.parse(readFileSync(this.statePath, 'utf8'));
+      const persisted = this.effectiveStateRaw();
+      if (persisted === undefined) return;
+      const state = JSON.parse(persisted);
       if (state.fingerprint !== this.fingerprint || state.base_url !== this.baseUrl) return;
       const raw = {
         object: 'sub2api.key_group', schema_version: 1,
@@ -244,43 +277,161 @@ export class KeyGroupClient {
         group: state.group, models: [state.model], revision: state.revision,
       };
       this.current = { ...normalizeMetadata(raw, state.model?.id), checked_at: state.checked_at,
-        generation: positiveInteger(state.generation, 0) };
+        generation: positiveInteger(state.generation, 0),
+        identity_generation: positiveInteger(state.identity_generation, 0) };
     } catch {
       // A malformed cache never prevents a fresh discovery or leaks credentials.
-      this.current = undefined;
+      // Preserve a known in-memory fallback when a later cache read is damaged.
     }
   }
 
-  writeState() {
+  stateText(snapshot) {
+    return JSON.stringify({ ...snapshot, fingerprint: this.fingerprint, base_url: this.baseUrl }, null, 2) + '\n';
+  }
+
+  readOptional(path) {
+    return path && existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  }
+
+  transactionPath() { return this.statePath + '.transaction.json'; }
+
+  effectiveStateRaw() {
+    const current = this.readOptional(this.statePath);
+    if (!this.configPath || !existsSync(this.transactionPath())) return current;
+    const pending = JSON.parse(readFileSync(this.transactionPath(), 'utf8'));
+    if (pending.config_path !== this.configPath || pending.state_path !== this.statePath) return current;
+    const newer = current && positiveInteger(JSON.parse(current).generation, 0) > pending.generation;
+    const complete = current === pending.state_after && this.readOptional(this.configPath) === pending.config_after;
+    return newer || complete ? current : pending.state_before;
+  }
+
+  sharedHeader() {
+    try { return JSON.parse(this.effectiveStateRaw() ?? '{}'); } catch { return {}; }
+  }
+
+  recoverTransaction(assertCurrent) {
+    if (!this.configPath || !existsSync(this.transactionPath())) return;
+    assertCurrent();
+    const pending = JSON.parse(readFileSync(this.transactionPath(), 'utf8'));
+    if (pending.config_path !== this.configPath || pending.state_path !== this.statePath) {
+      throw new DiscoveryError('persistence-conflict', 'A pending model transaction belongs to another profile');
+    }
+    const state = this.readOptional(this.statePath);
+    const config = this.readOptional(this.configPath);
+    const newer = state && positiveInteger(JSON.parse(state).generation, 0) > pending.generation;
+    const complete = state === pending.state_after && config === pending.config_after;
+    if (!newer && !complete) {
+      for (const [path, before, after, current] of [
+        [this.statePath, pending.state_before, pending.state_after, state],
+        [this.configPath, pending.config_before, pending.config_after, config],
+      ]) {
+        if (current !== before && current !== after) {
+          throw new DiscoveryError('persistence-conflict', 'A user edit prevents automatic transaction recovery');
+        }
+        if (current !== before) {
+          assertCurrent();
+          if (before === undefined) unlinkSync(path);
+          else privateWrite(path, before, current, assertCurrent);
+        }
+      }
+    }
+    assertCurrent();
+    unlinkSync(this.transactionPath());
+  }
+
+  writeState(assertCurrent = () => {}, expected) {
     if (!this.statePath || !this.current) return;
-    privateWrite(this.statePath, JSON.stringify({
-      ...this.current, fingerprint: this.fingerprint, base_url: this.baseUrl,
-    }, null, 2) + '\n');
+    privateWrite(this.statePath, this.stateText(this.current), expected, assertCurrent);
+  }
+
+  writeConfig(value, expected, assertCurrent) {
+    privateWrite(this.configPath, value, expected, assertCurrent);
   }
 
   async beginRequest() {
+    if (this.superseded) throw new DiscoveryError('superseded-identity', 'This model synchronizer belongs to an older profile identity');
     if (!this.statePath) return ++this.generation;
-    return await withFileLock(this.statePath + '.lock', () => {
+    return await withFileLock(this.statePath + '.lock', (assertCurrent) => {
+      this.recoverTransaction(assertCurrent);
       const path = this.statePath + '.sequence.json';
       let sequence = 0;
       try { sequence = positiveInteger(JSON.parse(readFileSync(path, 'utf8')).generation, 0); } catch {}
       this.readState();
-      const generation = Math.max(sequence, this.current?.generation ?? 0) + 1;
-      privateWrite(path, JSON.stringify({ generation }) + '\n');
+      const shared = this.sharedHeader();
+      const sameIdentity = shared.fingerprint === this.fingerprint && shared.base_url === this.baseUrl;
+      const identityGeneration = positiveInteger(shared.identity_generation, positiveInteger(shared.generation, 0));
+      if (this.enrolledGeneration !== undefined && !sameIdentity && identityGeneration > this.enrolledGeneration) {
+        this.superseded = true;
+        throw new DiscoveryError('superseded-identity', 'This model synchronizer belongs to an older profile identity');
+      }
+      const generation = Math.max(sequence, positiveInteger(shared.generation, 0), this.current?.generation ?? 0) + 1;
+      this.enrolledGeneration ??= generation;
+      privateWrite(path, JSON.stringify({ generation }) + '\n', undefined, assertCurrent);
       return generation;
     });
   }
 
   async commit(snapshot, generation) {
-    const apply = async () => {
+    const apply = async (assertCurrent = () => {}) => {
+      this.recoverTransaction(assertCurrent);
+      const shared = this.sharedHeader();
+      const sameIdentity = shared.fingerprint === this.fingerprint && shared.base_url === this.baseUrl;
+      const identityGeneration = positiveInteger(shared.identity_generation, positiveInteger(shared.generation, 0));
+      if (!sameIdentity && identityGeneration > (this.enrolledGeneration ?? generation)) {
+        this.superseded = true;
+      }
       // Every process rereads the same committed state while holding the lock.
       if (this.statePath) this.readState();
-      if ((this.current?.generation ?? 0) > generation) return this.current;
-      await this.onSnapshot(snapshot, this.current);
-      this.current = { ...snapshot, generation };
-      this.lastError = undefined;
-      this.writeState();
-      return this.current;
+      if (positiveInteger(shared.generation, 0) > generation || this.superseded) return this.current;
+      const previous = this.current;
+      const stateBefore = this.readOptional(this.statePath);
+      const next = { ...snapshot, generation,
+        identity_generation: sameIdentity ? (identityGeneration || this.enrolledGeneration || generation) : (this.enrolledGeneration ?? generation) };
+      let configBefore;
+      let configAfter;
+      if (this.configPath) {
+        configBefore = readFileSync(this.configPath, 'utf8');
+        const config = JSON.parse(configBefore);
+        if (config.plugins?.entries?.['sub2api-auto']?.enabled === false) return previous;
+        const updated = updateConfig(config, next, this.baseUrl, previous);
+        configAfter = JSON.stringify(config) === JSON.stringify(updated) ? configBefore : JSON.stringify(updated, null, 2) + '\n';
+        privateWrite(this.transactionPath(), JSON.stringify({
+          generation, state_path: this.statePath, config_path: this.configPath,
+          state_before: stateBefore, state_after: this.stateText(next), config_before: configBefore, config_after: configAfter,
+        }, null, 2) + '\n', undefined, assertCurrent);
+      }
+      try {
+        // Cache persistence must succeed before publishing a new configuration.
+        this.current = next;
+        this.writeState(assertCurrent, stateBefore);
+        assertCurrent();
+        if (this.configPath) {
+          if (configAfter !== configBefore) this.writeConfig(configAfter, configBefore, assertCurrent);
+          assertCurrent();
+          unlinkSync(this.transactionPath());
+        } else {
+          // Legacy callbacks must be atomic and use the supplied lock guard.
+          await this.onSnapshot(snapshot, previous, assertCurrent);
+          assertCurrent();
+        }
+        this.lastError = undefined;
+        return this.current;
+      } catch (error) {
+        this.current = previous;
+        try {
+          if (this.configPath) this.recoverTransaction(assertCurrent);
+          else if (this.statePath) {
+            assertCurrent();
+            const current = this.readOptional(this.statePath);
+            if (current === this.stateText(next)) {
+              if (stateBefore === undefined) unlinkSync(this.statePath);
+              else privateWrite(this.statePath, stateBefore, current, assertCurrent);
+            }
+          }
+          this.readState();
+        } catch { /* Keep the private recovery journal if storage or lock ownership is unavailable. */ }
+        throw error instanceof DiscoveryError ? error : new DiscoveryError('persistence-unavailable', 'Persisted model synchronization failed');
+      }
     };
     return this.statePath ? await withFileLock(this.statePath + '.lock', apply) : await apply();
   }

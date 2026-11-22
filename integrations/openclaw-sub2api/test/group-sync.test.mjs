@@ -4,8 +4,8 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { DiscoveryError, KeyGroupClient, normalizeMetadata, runtimeModel,
-  updateConfig, writeOpenClawConfig } from '../group-sync.mjs';
+import { DiscoveryError, KeyGroupClient, normalizeMetadata, privateWrite, runtimeModel,
+  updateConfig, withFileLock, writeOpenClawConfig } from '../group-sync.mjs';
 
 const fixture = (id = 'deepseek-v4.1-flash', target = 'cn:deepseek-v4.1-flash', groupId = 8) => ({
   object: 'sub2api.key_group', schema_version: 1,
@@ -249,4 +249,114 @@ test('separate Node processes share ordered commits, including a late old respon
   assert.equal((await old.done).model, 'new-model');
   assert.equal(JSON.parse(readFileSync(statePath)).model.id, 'new-model');
   assert.equal(JSON.parse(readFileSync(configPath)).agents.defaults.model.primary, 'sub2api/new-model');
+});
+
+for (const change of ['key', 'base-url']) {
+  test('an older ' + change + ' writer cannot overwrite another profile identity or adopt its fallback', async (t) => {
+    const { statePath, configPath } = setup(t); writeFileSync(configPath, JSON.stringify(config()));
+    let delayed = false; let releaseOld; let oldStarted; let oldCalls = 0;
+    const started = new Promise((resolve) => { oldStarted = resolve; });
+    const held = new Promise((resolve) => { releaseOld = resolve; });
+    const old = new KeyGroupClient({ statePath, key: 'old-key', baseUrl: 'http://old/v1',
+      onSnapshot: (snapshot, previous, guard) => writeOpenClawConfig(configPath, snapshot, 'http://old/v1', previous, guard),
+      fetchImpl: async () => {
+        oldCalls++;
+        if (delayed) { oldStarted(); return await held; }
+        return { ok: true, json: async () => fixture('old-model', 'cn:old-model', 8) };
+      }, logger: { warn() {} },
+    });
+    await old.refresh(); delayed = true;
+    const oldRequest = old.refresh({ fresh: true }); await started;
+    const currentBase = change === 'base-url' ? 'http://new/v1' : 'http://old/v1';
+    const current = new KeyGroupClient({ statePath, key: change === 'key' ? 'new-key' : 'old-key', baseUrl: currentBase,
+      onSnapshot: (snapshot, previous, guard) => writeOpenClawConfig(configPath, snapshot, currentBase, previous, guard),
+      fetchImpl: async () => {
+        const data = fixture('new-model', 'cn:new-model', 9); data.key.id = 9;
+        return { ok: true, json: async () => data };
+      },
+    });
+    await current.refresh({ fresh: true });
+    releaseOld({ ok: true, json: async () => fixture('old-model', 'cn:old-model', 8) });
+    const result = await oldRequest;
+    assert.equal(result.key_id, 8);
+    assert.equal(old.superseded, true);
+    const stored = JSON.parse(readFileSync(statePath));
+    assert.equal(stored.key_id, 9); assert.equal(stored.generation, 3);
+    assert.equal(stored.base_url, currentBase);
+    assert.equal(JSON.parse(readFileSync(configPath)).agents.defaults.model.primary, 'sub2api/new-model');
+    await old.refresh({ fresh: true }); assert.equal(oldCalls, 2);
+    assert.equal(new KeyGroupClient({ statePath, key: change === 'key' ? 'new-key' : 'old-key', baseUrl: currentBase }).current.model.id, 'new-model');
+  });
+}
+
+test('cache write failure cannot publish a new configuration or roll it back after offline restart', async (t) => {
+  const { statePath, configPath } = setup(t); writeFileSync(configPath, JSON.stringify(config()));
+  let latest = fixture('old-model', 'cn:old-model');
+  const options = { statePath, configPath, key: 'fixture-key', baseUrl: 'http://sub2api/v1', logger: { warn() {} },
+    fetchImpl: async () => ({ ok: true, json: async () => latest }) };
+  const client = new KeyGroupClient(options); await client.refresh();
+  const beforeConfig = readFileSync(configPath, 'utf8'); const beforeState = readFileSync(statePath, 'utf8');
+  latest = fixture('new-model', 'cn:new-model', 9);
+  client.writeState = () => { throw new Error('Injected storage I/O failure'); };
+  assert.equal((await client.refresh({ fresh: true })).model.id, 'old-model');
+  assert.equal(client.lastError.code, 'persistence-unavailable');
+  assert.equal(readFileSync(configPath, 'utf8'), beforeConfig);
+  assert.equal(readFileSync(statePath, 'utf8'), beforeState);
+  const restarted = new KeyGroupClient({ ...options, fetchImpl: async () => { throw new Error('Offline'); } });
+  assert.equal((await restarted.refresh({ fresh: true })).model.id, 'old-model');
+  assert.equal(readFileSync(configPath, 'utf8'), beforeConfig);
+});
+
+test('configuration write failure restores the cache in the same recovery transaction', async (t) => {
+  const { statePath, configPath } = setup(t); writeFileSync(configPath, JSON.stringify(config()));
+  let latest = fixture('old-model', 'cn:old-model');
+  const client = new KeyGroupClient({ statePath, configPath, key: 'fixture-key', baseUrl: 'http://sub2api/v1', logger: { warn() {} },
+    fetchImpl: async () => ({ ok: true, json: async () => latest }) });
+  await client.refresh(); const beforeState = readFileSync(statePath, 'utf8'); const beforeConfig = readFileSync(configPath, 'utf8');
+  latest = fixture('new-model', 'cn:new-model', 9);
+  client.writeConfig = () => { throw new Error('Injected config I/O failure'); };
+  assert.equal((await client.refresh({ fresh: true })).model.id, 'old-model');
+  assert.equal(readFileSync(statePath, 'utf8'), beforeState);
+  assert.equal(readFileSync(configPath, 'utf8'), beforeConfig);
+  assert.equal(client.lastError.code, 'persistence-unavailable');
+});
+
+for (const complete of [false, true]) {
+  test('offline restart recovers a ' + (complete ? 'completed' : 'partially applied') + ' configuration/cache transaction', async (t) => {
+    const { statePath, configPath } = setup(t); writeFileSync(configPath, JSON.stringify(config()));
+    const options = { statePath, configPath, key: 'fixture-key', baseUrl: 'http://sub2api/v1', logger: { warn() {} },
+      fetchImpl: async () => ({ ok: true, json: async () => fixture('old-model', 'cn:old-model') }) };
+    const client = new KeyGroupClient(options); await client.refresh();
+    const beforeState = readFileSync(statePath, 'utf8'); const beforeConfig = readFileSync(configPath, 'utf8');
+    const next = { ...normalizeMetadata(fixture('new-model', 'cn:new-model', 9)), generation: 2, identity_generation: 1 };
+    const afterState = client.stateText(next);
+    const afterConfig = JSON.stringify(updateConfig(JSON.parse(beforeConfig), next, client.baseUrl, client.current), null, 2) + '\n';
+    privateWrite(client.transactionPath(), JSON.stringify({ generation: 2, state_path: statePath, config_path: configPath,
+      state_before: beforeState, state_after: afterState, config_before: beforeConfig, config_after: afterConfig }));
+    privateWrite(statePath, afterState);
+    privateWrite(statePath + '.sequence.json', JSON.stringify({ generation: 2 }));
+    if (complete) privateWrite(configPath, afterConfig);
+    const restarted = new KeyGroupClient({ ...options, fetchImpl: async () => { throw new Error('Offline'); } });
+    const expected = complete ? 'new-model' : 'old-model';
+    assert.equal(restarted.current.model.id, expected);
+    assert.equal((await restarted.refresh({ fresh: true })).model.id, expected);
+    assert.equal(readFileSync(configPath, 'utf8'), complete ? afterConfig : beforeConfig);
+    assert.equal(readFileSync(statePath, 'utf8'), complete ? afterState : beforeState);
+  });
+}
+
+test('losing an acquired lock worker prevents an old operation from committing', { timeout: 10000 }, async (t) => {
+  const { dir } = setup(t); const lockPath = join(dir, 'shared.lock'); const target = join(dir, 'value.json');
+  privateWrite(target, 'old'); let started; let release; let workerPid;
+  const ready = new Promise((resolve) => { started = resolve; }); const held = new Promise((resolve) => { release = resolve; });
+  const stale = withFileLock(lockPath, async (guard) => {
+    workerPid = guard.workerPid; started(); await held;
+    privateWrite(target, 'stale', undefined, guard);
+    return 'unexpected-success';
+  });
+  await ready; process.kill(workerPid, 'SIGKILL');
+  await withFileLock(lockPath, (guard) => { privateWrite(target, 'new', undefined, guard); });
+  release();
+  await assert.rejects(stale, (error) => error.code === 'coordination-lost');
+  assert.equal(readFileSync(target, 'utf8'), 'new');
 });
