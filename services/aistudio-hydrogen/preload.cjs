@@ -5,9 +5,18 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { MODEL, requireModel, generationModel, requireObservedModel } = require("./contract.cjs");
+const { installNovnc } = require("./novnc.cjs");
 const root = process.cwd();
 const version = require(path.join(root, "package.json")).version;
 if (version !== "1.4.1") throw new Error("The Hydrogen adapter requires AIStudioToAPI v1.4.1.");
+
+// Copy the pinned noVNC 1.4.0 tree into the SPA before Express starts and
+// replace its esm.sh import with the local ES module entrypoint.
+const novnc = installNovnc({
+  sourceDir: path.join(__dirname, "vendor/novnc"),
+  distDir: path.join(root, "ui/dist"),
+});
+console.info("[AIProxyKit] noVNC self-host assets ready: " + JSON.stringify(novnc));
 
 const RequestHandler = require(path.join(root, "src/core/RequestHandler"));
 const FormatConverter = require(path.join(root, "src/core/FormatConverter"));

@@ -9,6 +9,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash -n install.sh start.sh stop.sh status.sh check.sh
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Validate AI Studio adapter
+        run: |
+          node tests/test_aistudio_hydrogen.cjs
+          node --test tests/test_aistudio_novnc.cjs
       - run: bash install.sh --prepare-only
       - name: Validate all gateway bindings
         run: |
