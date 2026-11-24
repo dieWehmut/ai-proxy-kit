@@ -1,0 +1,9 @@
+{
+  "models": [
+    {
+      "name": "models/gemini-4-hydrogen",
+      "displayName": "Gemini 4 Hydrogen",
+      "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]
+    }
+  ]
+}

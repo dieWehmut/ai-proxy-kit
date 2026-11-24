@@ -1,0 +1,7 @@
+# Restrict this deployment to the requested model without rebuilding the browser image.
+services:
+  aistudio:
+    command: [node, --require, /app/proxy-kit/preload.cjs, main.js]
+    volumes:
+      - ./services/aistudio-hydrogen:/app/proxy-kit:ro
+      - ./services/aistudio-hydrogen/models.json:/app/configs/models.json:ro

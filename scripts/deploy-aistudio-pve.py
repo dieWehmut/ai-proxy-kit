@@ -69,24 +69,32 @@ values['LOCAL_UID'] = str(os.getuid())
 values['LOCAL_GID'] = str(os.getgid())
 values['ANTIGRAVITY_DATA_DIR'] = str(base / 'runtime/antigravity')
 values['SUB2API_DOCKER_NETWORK'] = payload['network']
+if payload.get('hydrogen_only'):
+    values['AISTUDIO_HYDROGEN_ONLY'] = 'true'
 proxykit.save_env(env_file, values)
 for folder in ['aistudio/auth', 'aistudio/data']:
     (base / 'runtime' / folder).mkdir(mode=0o700, parents=True, exist_ok=True)
 
-command = ['docker', 'compose', '--project-name', 'ai-proxy-kit-aistudio', '--project-directory', str(base), '--env-file', str(env_file), '-f', str(base / 'compose.yml'), '-f', str(base / 'compose.aistudio-sub2api.yml'), '--profile', 'aistudio']
+command = ['docker', 'compose', '--project-name', 'ai-proxy-kit-aistudio', '--project-directory', str(base), '--env-file', str(env_file), '-f', str(base / 'compose.yml'), '-f', str(base / 'compose.aistudio-sub2api.yml')]
+hydrogen_only = values.get('AISTUDIO_HYDROGEN_ONLY') == 'true'
+if hydrogen_only:
+    command += ['-f', str(base / 'compose.aistudio-hydrogen.yml')]
+command += ['--profile', 'aistudio']
 render = subprocess.run(command + ['config', '--format', 'json'], capture_output=True, text=True, env=dict(os.environ, **values), check=True)
 model = json.loads(render.stdout)
 if set(model['services']) != {'aistudio'}:
     raise RuntimeError('The deployment must contain only the AI Studio service')
 if not model['networks']['sub2api']['external'] or model['networks']['sub2api']['name'] != payload['network']:
     raise RuntimeError('AI Studio must join the existing Sub2API network')
+if hydrogen_only and model['services']['aistudio']['command'] != ['node', '--require', '/app/proxy-kit/preload.cjs', 'main.js']:
+    raise RuntimeError('The Hydrogen adapter must be active')
 
 result = subprocess.run(command + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'aistudio'], capture_output=True, text=True, env=dict(os.environ, **values), timeout=90)
 error = result.stderr.strip()
 for name, value in values.items():
     if any(word in name for word in ['PASSWORD', 'SECRET', 'TOKEN', 'KEY']) and len(value) > 8:
         error = error.replace(value, '<redacted>')
-receipt = {'directory': str(base), 'backup': str(backup), 'source': payload['source'], 'image': payload['image'], 'image_architecture': image_data['Architecture'], 'compose_rc': result.returncode, 'output': result.stdout.strip(), 'error': error[:1200]}
+receipt = {'directory': str(base), 'backup': str(backup), 'source': payload['source'], 'image': payload['image'], 'image_architecture': image_data['Architecture'], 'hydrogen_only': hydrogen_only, 'compose_rc': result.returncode, 'output': result.stdout.strip(), 'error': error[:1200]}
 (backup / 'deployment-result.json').write_text(json.dumps(receipt, indent=2))
 print(json.dumps(receipt), flush=True)
 raise SystemExit(result.returncode)
@@ -102,6 +110,7 @@ def main():
     parser.add_argument("--directory", default="/opt/ai-proxy-kit-aistudio")
     parser.add_argument("--network", default="sub2api_sub2api-network")
     parser.add_argument("--env-file", type=pathlib.Path, default=ROOT / "runtime/stack.env")
+    parser.add_argument("--hydrogen-only", action="store_true", help="Register and strictly route only gemini-4-hydrogen")
     args = parser.parse_args()
     compile(REMOTE_INSTALL, "aistudio-lxc-install", "exec")
     sys.path.insert(0, str(ROOT / "lib"))
@@ -111,7 +120,7 @@ def main():
         raise ValueError("Run install.sh aistudio --prepare-only before deployment")
     archive = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT, capture_output=True, check=True).stdout
     source = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
-    payload = {"archive": base64.b64encode(archive).decode(), "env": args.env_file.read_text(), "source": source, "directory": args.directory, "network": args.network, "image": values["AISTUDIO_IMAGE"]}
+    payload = {"archive": base64.b64encode(archive).decode(), "env": args.env_file.read_text(), "source": source, "directory": args.directory, "network": args.network, "image": values["AISTUDIO_IMAGE"], "hydrogen_only": args.hydrogen_only}
     wrapper = "import subprocess,sys\nresult=subprocess.run(['pct','exec'," + repr(str(args.vmid)) + ", '--','python3','-c'," + repr(REMOTE_INSTALL) + "],input=sys.stdin.read(),text=True,capture_output=True)\nprint(result.stdout)\nsys.stderr.write(result.stderr)\nraise SystemExit(result.returncode)"
     compile(wrapper, "aistudio-pve-forwarder", "exec")
     command = [args.ssh, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
