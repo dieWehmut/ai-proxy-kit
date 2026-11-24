@@ -1,0 +1,59 @@
+{
+  "health": {
+    "status": 200,
+    "content_type": "application/json"
+  },
+  "webui": {
+    "status": 200,
+    "content_type": "text/html"
+  },
+  "webui_admin_status": 200,
+  "account_count": 0,
+  "upstream_models_status": 200,
+  "upstream_model_count": 28,
+  "unauthenticated_models_status": 401,
+  "sub2api_binding": {
+    "group_id": 9,
+    "group_name": "antigravity",
+    "account_id": 6,
+    "account_name": "antigravity-lxc158",
+    "model_count": 28,
+    "model_allowlist_enabled": false
+  },
+  "sub2api_models_status": 200,
+  "sub2api_model_count": 25,
+  "sub2api_to_antigravity_health_rc": 0,
+  "key_id": 10,
+  "accounts_to_be_added_manually": true,
+  "credentials_path": "/opt/ai-proxy-kit-antigravity/runtime/sub2api-antigravity-key.json",
+  "container": "antigravity-manager Up 13 minutes (healthy) 0.0.0.0:8045->8045/tcp",
+  "robot_groups": [
+    {
+      "id": 8,
+      "group_id": 8
+    },
+    {
+      "id": 7,
+      "group_id": 8
+    }
+  ],
+  "startup_wrapper_verification": {
+    "after_compose": {
+      "running": true,
+      "port": 8045,
+      "active_accounts": 0,
+      "models_status": 200,
+      "models_count": 28
+    },
+    "after_restart": {
+      "running": true,
+      "port": 8045,
+      "active_accounts": 0,
+      "models_status": 200,
+      "models_count": 28
+    }
+  },
+  "proxy_running_after_restart": true,
+  "manual_accounts": true,
+  "upstream_generation": "Deferred: operator will add accounts manually"
+}
