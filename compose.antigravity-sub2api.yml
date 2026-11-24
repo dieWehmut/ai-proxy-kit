@@ -1,0 +1,9 @@
+services:
+  antigravity:
+    container_name: antigravity-manager
+    networks: [sub2api]
+
+networks:
+  sub2api:
+    external: true
+    name: ${SUB2API_DOCKER_NETWORK:?Set the existing Sub2API network name}
