@@ -1,0 +1,20 @@
+{
+  "login_status": 200,
+  "login_redirect_path": "/",
+  "binding_ui_status": 200,
+  "vnc_launch_status": 200,
+  "vnc_launch": {
+    "protocol": "websocket",
+    "success": true
+  },
+  "sub2api_models_status": 200,
+  "sub2api_models": [
+    "gemini-4-hydrogen"
+  ],
+  "group_id": 12,
+  "group_name": "aistudio-gemini-4-hydrogen",
+  "account_id": 9,
+  "key_id": 11,
+  "model": "gemini-4-hydrogen",
+  "upstream_generation": "Awaiting operator Google login through the binding UI"
+}
