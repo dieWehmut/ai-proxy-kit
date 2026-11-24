@@ -50,12 +50,17 @@ export function registerIntegration(api, dependencies = {}) {
     return { providerOverride: 'sub2api', modelOverride: snapshot.model.id, fallbacksOverride: [] };
   }, { priority: 1000 });
 
-  const currentDefinition = () => {
+  const currentDefinition = (context = {}) => {
     if (!enabled() || !client.current) return null;
     const definition = runtimeModel(client.current, baseUrl);
     const configured = readConfig(configPath, api.config).models?.providers?.sub2api?.models?.find((model) => model.id === definition.id);
-    return configured ? { ...definition, ...configured, id: definition.id, provider: definition.provider,
+    const resolved = configured ? { ...definition, ...configured, provider: definition.provider,
       api: definition.api, baseUrl: definition.baseUrl } : definition;
+    // Newer OpenClaw rematerializes the cached session model for authentication
+    // before running the turn hook. That phase requires the requested identity;
+    // before_model_resolve then selects the fresh key-group model for generation.
+    const id = typeof context.modelId === 'string' && context.modelId ? context.modelId : definition.id;
+    return { ...resolved, id };
   };
 
   api.registerProvider({
@@ -64,7 +69,7 @@ export function registerIntegration(api, dependencies = {}) {
     // Node22 OpenClaw expects void here, while newer versions also accept a model.
     prepareDynamicModel: async () => { if (enabled()) await client.refresh({ fresh: true }); },
     preferRuntimeResolvedModel: () => enabled(),
-    normalizeResolvedModel: ({ model }) => currentDefinition() ?? model,
+    normalizeResolvedModel: ({ model }) => currentDefinition({ modelId: model.id }) ?? model,
   });
 
   const setTimer = dependencies.setInterval ?? setInterval;

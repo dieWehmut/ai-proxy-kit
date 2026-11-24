@@ -65,6 +65,27 @@ test('explicit non-Sub2API selections and disabled plugins are untouched', async
   assert.equal(requests, 0);
 });
 
+test('cached model authentication keeps its identity before the next turn selects the new group', async (t) => {
+  const fixture = setup(t); let current = metadata();
+  const integration = registerIntegration(fixture.api, {
+    env: { SUB2API_API_URL: 'http://sub2api/v1', SUB2API_API_KEY: 'fixture-key' },
+    fetchImpl: async () => ({ ok: true, json: async () => current }),
+  });
+  const context = { modelProviderId: 'sub2api', modelId: 'model-a', sessionKey: 'same-session' };
+  await fixture.hooks.before_model_resolve({}, context);
+  current = metadata('model-b', 9);
+  await integration.client.refresh({ fresh: true });
+  const provider = fixture.providers[0];
+  const cached = provider.resolveDynamicModel({ modelId: 'model-a' });
+  assert.equal(cached.id, 'model-a');
+  assert.equal(provider.normalizeResolvedModel({ model: cached }).id, 'model-a');
+  assert.equal(cached.provider, 'sub2api');
+  const next = await fixture.hooks.before_model_resolve({}, context);
+  assert.equal(next.modelOverride, 'model-b');
+  assert.equal(provider.resolveDynamicModel({ modelId: next.modelOverride }).id, 'model-b');
+  assert.equal(integration.client.current.model.id, 'model-b');
+});
+
 test('service refresh is persistent and its timer is stopped with the gateway', async (t) => {
   const fixture = setup(t); let tick; let cleared = false; let group = metadata();
   const integration = registerIntegration(fixture.api, {
