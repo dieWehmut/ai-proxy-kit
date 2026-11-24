@@ -1,0 +1,109 @@
+{
+  "started_at": "2026-11-24T06:15:22.089912+00:00",
+  "phases": {
+    "group_b": [
+      {
+        "ct": 152,
+        "phase": "group_b",
+        "rc": 0,
+        "key_group": 13,
+        "discovered_models": [
+          "cn:hy4flash-free"
+        ],
+        "status": "ok",
+        "provider": "sub2api",
+        "model": "cn:hy4flash-free",
+        "session_id": "codex-sub2api-live-152-20261124",
+        "payloads": [
+          "SYNC_OK"
+        ],
+        "execution_trace": {
+          "winnerModel": "cn:hy4flash-free",
+          "fallbackUsed": false,
+          "runner": "embedded"
+        }
+      },
+      {
+        "ct": 153,
+        "phase": "group_b",
+        "rc": 0,
+        "key_group": 13,
+        "discovered_models": [
+          "cn:hy4flash-free"
+        ],
+        "status": "ok",
+        "provider": "sub2api",
+        "model": "cn:hy4flash-free",
+        "session_id": "codex-sub2api-live-153-20261124",
+        "payloads": [
+          "SYNC_OK"
+        ],
+        "execution_trace": {
+          "winnerModel": "cn:hy4flash-free",
+          "fallbackUsed": false,
+          "runner": "embedded"
+        }
+      }
+    ],
+    "group_a": [
+      {
+        "ct": 152,
+        "phase": "group_a",
+        "rc": 0,
+        "key_group": 13,
+        "discovered_models": [
+          "cn:deepseek-v4.1-flash"
+        ],
+        "status": "ok",
+        "provider": "sub2api",
+        "model": "cn:deepseek-v4.1-flash",
+        "session_id": "codex-sub2api-live-152-20261124",
+        "payloads": [
+          "SYNC_OK"
+        ],
+        "execution_trace": {
+          "winnerModel": "cn:deepseek-v4.1-flash",
+          "fallbackUsed": false,
+          "runner": "embedded"
+        }
+      },
+      {
+        "ct": 153,
+        "phase": "group_a",
+        "rc": 0,
+        "key_group": 13,
+        "discovered_models": [
+          "cn:deepseek-v4.1-flash"
+        ],
+        "status": "ok",
+        "provider": "sub2api",
+        "model": "cn:deepseek-v4.1-flash",
+        "session_id": "codex-sub2api-live-153-20261124",
+        "payloads": [
+          "SYNC_OK"
+        ],
+        "execution_trace": {
+          "winnerModel": "cn:deepseek-v4.1-flash",
+          "fallbackUsed": false,
+          "runner": "embedded"
+        }
+      }
+    ]
+  },
+  "move": {
+    "phase": "keys_moved_to_b",
+    "group_id": 13
+  },
+  "model_change": {
+    "phase": "group_changed_to_a",
+    "group_id": 13
+  },
+  "restore": {
+    "phase": "keys_restored",
+    "group_id": 13
+  },
+  "cleanup": {
+    "phase": "cleaned_up",
+    "group_id": 13
+  }
+}
