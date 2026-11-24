@@ -26,6 +26,9 @@ node integrations/openclaw-sub2api/install.mjs --profile /root/.openclaw
 `--openclaw-entry` 指定网关使用的 Node 和 `openclaw/dist/index.js`。
 插件路径必须在网关重启后仍可读取；可通过 `--plugin` 指定其安装目录。
 首次安装后重启现有 OpenClaw 网关服务。
+新版 OpenClaw 的第三方 `before_model_resolve` 钩子需要显式的
+`hooks.allowConversationAccess` 权限。安装器通过实际 CLI 校验后配置它；
+旧版不支持该字段时只省略该字段。插件不读取或发送会话正文，发现请求仅包含自己的 Key。
 
 `SUB2API_MODEL`、`ACTIVE_MODEL_PROVIDER`、`ACTIVE_MODEL_ID` 的配置引用先迁移，
 再从 `.env` 删除。`ACTIVE_MODEL_REASONING_EFFORT`、其他 Key、QQ、MCP 和独立设置保留。

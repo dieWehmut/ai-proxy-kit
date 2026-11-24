@@ -75,10 +75,11 @@ export async function install(options = {}, dependencies = {}) {
   next.plugins.load.paths ??= [];
   if (!next.plugins.load.paths.includes(pluginPath)) next.plugins.load.paths.push(pluginPath);
   next.plugins.entries ??= {};
-  next.plugins.entries[PLUGIN_ID] = { enabled: true, config: {
+  next.plugins.entries[PLUGIN_ID] = { enabled: true,
+    hooks: { ...next.plugins.entries[PLUGIN_ID]?.hooks, allowConversationAccess: true }, config: {
     baseUrl, keyEnv: 'SUB2API_API_KEY', configPath, statePath, refreshIntervalMs: 15000, timeoutMs: 4000,
   } };
-  const nextConfig = JSON.stringify(next, null, 2) + '\n';
+  let nextConfig = JSON.stringify(next, null, 2) + '\n';
   if (/\$\{(?:SUB2API_MODEL|ACTIVE_MODEL_PROVIDER|ACTIVE_MODEL_ID)\}/.test(nextConfig)) {
     throw new Error('Removed model environment references remain in OpenClaw configuration');
   }
@@ -96,7 +97,17 @@ export async function install(options = {}, dependencies = {}) {
     const validate = dependencies.validate ?? ((path, env) => spawnSync(node, [entry, 'config', 'validate', '--json'], {
       env, encoding: 'utf8', timeout: 45000, maxBuffer: 2 * 1024 * 1024,
     }));
-    const result = validate(stageConfig, validationEnv);
+    let result = validate(stageConfig, validationEnv);
+    const diagnostic = String(result.stdout ?? '') + '\n' + String(result.stderr ?? '');
+    if (result.status !== 0 && /allowConversationAccess/.test(diagnostic) &&
+        /unrecognized|unknown|unsupported/i.test(diagnostic)) {
+      // Older OpenClaw allows this hook without the newer explicit grant.
+      delete next.plugins.entries[PLUGIN_ID].hooks.allowConversationAccess;
+      if (!Object.keys(next.plugins.entries[PLUGIN_ID].hooks).length) delete next.plugins.entries[PLUGIN_ID].hooks;
+      nextConfig = JSON.stringify(next, null, 2) + '\n';
+      privateWrite(stageConfig, nextConfig);
+      result = validate(stageConfig, validationEnv);
+    }
     if (result.status !== 0) {
       // Avoid printing CLI diagnostic values: they can contain profile secrets.
       throw new Error('The installed OpenClaw rejected the staged group-managed configuration');
@@ -124,7 +135,9 @@ export async function install(options = {}, dependencies = {}) {
   }
   const receipt = { plugin: PLUGIN_ID, key_id: snapshot.key_id, group: snapshot.group,
     model: snapshot.model.id, upstream_model: snapshot.model.upstream_model,
-    backup, config_validated: true, removed_model_environment: [...MANUAL_MODEL_KEYS], restart_required: true };
+    backup, config_validated: true,
+    conversation_hook_granted: next.plugins.entries[PLUGIN_ID].hooks?.allowConversationAccess === true,
+    removed_model_environment: [...MANUAL_MODEL_KEYS], restart_required: true };
   privateWrite(join(backup, 'installation.json'), JSON.stringify(receipt, null, 2) + '\n');
   return receipt;
 }

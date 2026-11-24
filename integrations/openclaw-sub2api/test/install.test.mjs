@@ -56,6 +56,29 @@ test('installer removes model env dependencies and validates against the running
   assert.equal(statSync(join(receipt.backup, '.env')).mode & 0o777, 0o600);
   assert.deepEqual(cfg.plugins.allow, ['qq', 'sub2api-auto']);
   assert.deepEqual(cfg.plugins.load.paths, ['/fixture/plugin']);
+  assert.equal(cfg.plugins.entries['sub2api-auto'].hooks.allowConversationAccess, true);
+  assert.equal(receipt.conversation_hook_granted, true);
+});
+
+test('legacy CLI validation omits only its unsupported conversation hook grant', async (t) => {
+  const fixture = profile(t); let attempts = 0;
+  const receipt = await install({ profile: fixture.root, backupRoot: join(fixture.root, 'backups') }, {
+    fetchImpl: async () => ({ ok: true, json: async () => response }),
+    validate: (path) => {
+      attempts++;
+      const config = JSON.parse(readFileSync(path));
+      if (config.plugins.entries['sub2api-auto'].hooks?.allowConversationAccess) {
+        return { status: 1, stderr: 'hooks: Unrecognized key: "allowConversationAccess"' };
+      }
+      return { status: 0 };
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(receipt.conversation_hook_granted, false);
+  const config = JSON.parse(readFileSync(join(fixture.root, 'openclaw.json')));
+  assert.equal(config.plugins.entries['sub2api-auto'].hooks, undefined);
+  assert.deepEqual(config.channels, fixture.cfg.channels);
+  assert.equal(readEnv(readFileSync(join(fixture.root, '.env'), 'utf8')).WB_API, 'fixture-old-key');
 });
 
 test('validation failure leaves the profile untouched', async (t) => {
