@@ -19,6 +19,11 @@ Accounts can be added manually through the WebUI after deployment. Optional
 accounts are retained on subsequent runs. API and WebUI credentials remain in
 the private deployment directory's `runtime/stack.env`.
 
+The startup wrapper reads the saved proxy `auto_start` setting once after the
+WebUI is ready. It restores the API switch on container restarts, including an
+empty account store, and respects a manual pause saved in the WebUI. It forwards
+termination signals to the official headless process and never prints credentials.
+
 With the default port, the LAN WebUI is `http://lxc158-host:8045/`, and the
 OpenAI Base URL is `http://lxc158-host:8045/v1`. Sub2API can reach the service
 inside Docker at `http://antigravity:8045`.

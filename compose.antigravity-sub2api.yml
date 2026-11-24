@@ -2,6 +2,10 @@ services:
   antigravity:
     container_name: antigravity-manager
     networks: [sub2api]
+    init: true
+    entrypoint: [/bin/sh, /app/proxy-kit/start.sh]
+    volumes:
+      - ./services/antigravity/start.sh:/app/proxy-kit/start.sh:ro
 
 networks:
   sub2api:
