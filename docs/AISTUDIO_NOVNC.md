@@ -52,3 +52,7 @@ curl -fsSI http://127.0.0.1:7860/vendor/novnc/core/rfb.js
 
 该改写发生在容器启动时，因此不会修改本地镜像；每次新容器启动都会从镜像中的
 原始 SPA 重新复制并改写。升级 AI Studio 时必须重新核对硬编码 URL 和版本检查。
+
+## 实机验证
+
+- [LXC 158 旧 7860 栈的 noVNC 自托管验证](validation/aistudio-lxc158-novnc-20261124.md)
