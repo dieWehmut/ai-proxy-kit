@@ -90,7 +90,16 @@ AI Studio 安装与验收见 [Windows 本机安装 AI Studio 反代](docs/WINDOW
 - AI Studio：控制台密码为 `AISTUDIO_WEB_PASSWORD`，API Key 为 `AISTUDIO_API_KEY`；通过控制台 VNC 完成本人 Google 登录。
 
 本机浏览器已经登录 Google 时，可以直接[导出并复用现有会话](docs/AISTUDIO_LOCAL_LOGIN.md)，
-导入脚本会通知现有 AI Studio 重载。
+导入脚本会通知现有 AI Studio 重载，并新增 `--ready-timeout`（秒，默认 60）等待账号就绪；
+它轮询 `/api/status`，以 `currentAuthIndex` 指向有效账号为判据。`browserConnected` 只代表
+浏览器进程已经启动，不能单独证明账号就绪。
+
+AI Studio 的 VNC 登录页已改为本地 vendored 的 noVNC，资源来自仓库内的
+`services/aistudio-novnc/`，不再依赖 `esm.sh`。本机更新部署时显式叠加 noVNC 覆盖层：
+
+```bash
+docker compose --env-file runtime/stack.env --profile aistudio -f compose.yml -f compose.aistudio-novnc.yml up -d aistudio
+```
 
 已有账号可显式接入；Windows 目录在 WSL 下使用 `/mnt/c/`、`/mnt/d/` 路径：
 
@@ -151,6 +160,9 @@ bash -n *.sh
 端口冲突时不会停止其他程序。停止命令不删除数据。迁移时同时备份 `runtime/` 和
 sub2api 的 Docker 命名卷；只复制脚本不会迁移账号。
 WSL2 NAT 下，从局域网经 Windows IP 访问仍取决于 Windows 转发和防火墙。
+
+AI Studio 本机镜像的 `/v1/models` 是镜像内静态清单，共 31 个。`gemini-4-hydrogen` 由
+hydrogen 覆盖层注入，属于 LXC 那套部署；它不是这份静态清单的一部分。
 
 GitHub Actions 检查 Linux 配置、凭据保留、网关绑定地址，以及 Windows PowerShell 5.1 / 7。
 真实结果见 [WSL 验收记录](docs/VALIDATION.md)。AI Studio 的选择依据见 [方案比较](docs/AISTUDIO_COMPARISON.md)。

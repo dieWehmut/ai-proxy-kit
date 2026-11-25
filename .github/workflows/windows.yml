@@ -16,6 +16,23 @@ jobs:
       - name: Parse scripts and verify installer functions
         shell: powershell
         run: ./tests/Test-Functions.ps1
+      - name: Parse and run session import tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testPath = Join-Path (Get-Location) 'tests/Test-SessionImport.ps1'
+          if (-not (Test-Path -LiteralPath $testPath)) {
+            throw "Required test file is missing: $testPath"
+          }
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($testPath, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($null -ne $errors -and $errors.Count -gt 0) {
+            foreach ($error in $errors) { Write-Host $error.ToString() }
+            exit 1
+          }
+          & $testPath
+          if (-not $?) { exit 1 }
 
   powershell-7:
     runs-on: windows-latest
@@ -24,3 +41,20 @@ jobs:
       - name: Parse scripts and verify installer functions
         shell: pwsh
         run: ./tests/Test-Functions.ps1
+      - name: Parse and run session import tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testPath = Join-Path (Get-Location) 'tests/Test-SessionImport.ps1'
+          if (-not (Test-Path -LiteralPath $testPath)) {
+            throw "Required test file is missing: $testPath"
+          }
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($testPath, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($null -ne $errors -and $errors.Count -gt 0) {
+            foreach ($error in $errors) { Write-Host $error.ToString() }
+            exit 1
+          }
+          & $testPath
+          if (-not $?) { exit 1 }
