@@ -47,6 +47,9 @@ export function normalizeModelsList(payload, preferredAlias) {
       if (id && !ids.includes(id)) ids.push(id);
     }
   }
+  if (ids.length === 0) {
+    throw new DiscoveryError('empty-model-list', 'The key currently exposes no models');
+  }
   if (ids.length !== 1) {
     throw new DiscoveryError('non-unique-model', 'The key must expose exactly one model');
   }
@@ -232,8 +235,7 @@ export function updateConfig(config, snapshot, baseUrl, previousSnapshot) {
     (sameTarget ? provider.models?.find((model) => model.id === previousSnapshot?.model.id) : undefined);
   provider.baseUrl = inferenceBase;
   provider.api = api;
-  provider.models = [{ ...(oldEntry || entry), id: entry.id, api,
-    ...(!oldEntry ? entry : {}) }];
+  provider.models = [{ ...(oldEntry || entry), id: entry.id, api }];
   const defaults = next.agents?.defaults;
   if (!defaults) throw new DiscoveryError('unmanaged-config', 'OpenClaw agent defaults are missing');
   const primary = typeof defaults.model === 'string' ? defaults.model : defaults.model?.primary;
@@ -242,7 +244,7 @@ export function updateConfig(config, snapshot, baseUrl, previousSnapshot) {
     defaults.model = { ...((typeof defaults.model === 'object' && defaults.model) || {}), primary: ref, fallbacks: [] };
     defaults.models ??= {};
     const oldRef = previousSnapshot?.model.id && 'sub2api/' + previousSnapshot.model.id;
-    const selectedOptions = sameTarget ? (defaults.models[ref] ?? (oldRef && defaults.models[oldRef])) : undefined;
+    const selectedOptions = defaults.models[ref] ?? (sameTarget && oldRef ? defaults.models[oldRef] : undefined);
     for (const id of Object.keys(defaults.models)) {
       if (id.startsWith('sub2api/') && id !== 'sub2api/*') delete defaults.models[id];
     }
@@ -293,6 +295,8 @@ export class KeyGroupClient {
     // Set when discovery authoritatively reports more than one candidate model.
     // The cache is kept for diagnostics, but no turn may be overridden.
     this.ambiguous = false;
+    this.fallbackNoted = false;
+    this.lastWarnCode = undefined;
     this.lastWarning = 0;
     this.generation = 0;
     this.enrolledGeneration = undefined;
@@ -497,10 +501,14 @@ export class KeyGroupClient {
   /** A synthetic, credential-free snapshot for the model-list fallback tier. */
   modelsSnapshot(listed) {
     const identity = positiveInteger(this.current?.key_id, 1);
+    // /models carries no platform. Reuse the last authoritative one so a single
+    // 404 during a deploy blip cannot rewrite a working anthropic/gemini/deepseek
+    // deployment to the openai-completions transport (and persist that guess).
+    const platform = this.current?.group?.platform ?? 'openai';
     return {
       schema_version: 1,
       key_id: identity,
-      group: { id: identity, name: MODELS_GROUP_NAME, platform: 'openai', status: 'active' },
+      group: { id: identity, name: MODELS_GROUP_NAME, platform, status: 'active' },
       model: listed.model,
       revision: 'models:' + keyFingerprint(listed.model.aliases.join('\n')),
     };
@@ -530,6 +538,7 @@ export class KeyGroupClient {
       }
       transportFor(snapshot.group.platform, this.baseUrl);
       this.ambiguous = false;
+      this.fallbackNoted = false;
       snapshot.checked_at = new Date(this.now()).toISOString();
       return await this.commit(snapshot, generation);
     } catch (error) {
@@ -539,9 +548,15 @@ export class KeyGroupClient {
       // model would pin the bot to a target the key may no longer serve.
       if (code === 'non-unique-model') this.ambiguous = true;
       this.lastError = { code, at: new Date(this.now()).toISOString(), keeping_last_model: Boolean(this.current) };
-      if (this.now() - this.lastWarning >= 30000 || !this.lastWarning) {
-        this.logger.warn?.('Sub2API group sync: ' + code + (this.current ? '; keeping last available model' : '; no cached model'));
+      // A permanently ambiguous key is a stable state, not an incident: warn once
+      // an hour instead of every refresh interval. A different code always warns.
+      const interval = code === 'non-unique-model' ? 3600000 : 30000;
+      if (code !== this.lastWarnCode || this.now() - this.lastWarning >= interval || !this.lastWarning) {
+        try {
+          this.logger.warn?.('Sub2API group sync: ' + code + (this.current ? '; keeping last available model' : '; no cached model'));
+        } catch { /* an untrusted logger must never fail a turn */ }
         this.lastWarning = this.now();
+        this.lastWarnCode = code;
       }
       return this.current;
     }

@@ -41,7 +41,8 @@ node integrations/openclaw-sub2api/install.mjs --profile /root/.openclaw
 1. 首选 `GET {baseUrl}/sub2api/key-group`，读取 `schema_version=1` 的 `sub2api.key_group` 文档
    （含分组平台、别名、修订号），据此选择传输协议。
 2. 该端点返回 404/405/501 时，回退到标准 `GET {baseUrl}/models`。Sub2API 会按 Key 的分组白名单过滤，
-   因此回退结果**恰好只有一个**模型 id 时同样可信；回退一律使用 `openai-completions` 与原 `baseUrl`。
+   因此回退结果**恰好只有一个**模型 id 时同样可信。回退沿用上次已知的分组 `platform`（无历史时按
+`openai-completions`），避免一次 404 就把 anthropic/gemini/deepseek 部署改写成 openai 传输。
 
 若 `/models` 返回 0 个或 ≥2 个 id，说明该 Key 未绑定单模型分组：插件把它当作**权威歧义**，
 不写配置、也不覆盖每轮模型选择，`agents.defaults.model.primary` 继续生效。
