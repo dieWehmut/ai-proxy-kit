@@ -21,17 +21,20 @@ import urllib.parse
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVICES = ("antigravity", "workbuddy", "sub2api", "aistudio")
+SERVICES = ("antigravity", "workbuddy", "sub2api", "aistudio", "qoder")
 DEFAULTS = {
     "ANTIGRAVITY_PORT": "8045", "WORKBUDDY_PORT": "7863", "SUB2API_PORT": "8080", "AISTUDIO_PORT": "2048",
+    "QODER_PORT": "8790",
     "ANTIGRAVITY_IMAGE": "lbjlaq/antigravity-manager:v5.0.3",
     "WORKBUDDY_IMAGE": "ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0",
     "SUB2API_IMAGE": "weishaw/sub2api:0.2.23",
     "AISTUDIO_IMAGE": "ghcr.io/mag1cfall/aistudio2api:latest",
+    "QODER_IMAGE": "ghcr.io/shuishuipingan/qoder2api-hub:latest",
     "SUB2API_EMAIL": "admin@sub2api.local", "UPSTREAM_PROXY": "", "TZ": "Asia/Shanghai",
 }
 SECRET_KEYS = ("ANTIGRAVITY_API_KEY", "ANTIGRAVITY_WEB_PASSWORD", "WORKBUDDY_API_KEY", "AISTUDIO_API_KEY", "AISTUDIO_ADMIN_PASSWORD",
-               "SUB2API_PASSWORD", "POSTGRES_PASSWORD", "REDIS_PASSWORD", "JWT_SECRET", "TOTP_ENCRYPTION_KEY")
+               "SUB2API_PASSWORD", "POSTGRES_PASSWORD", "REDIS_PASSWORD", "JWT_SECRET", "TOTP_ENCRYPTION_KEY",
+               "QODER_API_KEY", "QODER_PANEL_PASSWORD")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -110,9 +113,16 @@ def initialize(args):
     if len(set(ports)) != len(ports) or any(not 1 <= p <= 65535 for p in ports):
         raise ValueError("Gateway ports must be distinct numbers between 1 and 65535")
     save_env(args.env_file, values)
-    for folder in ("antigravity", "workbuddy/auths", "workbuddy/data", "aistudio/data"):
+    for folder in ("antigravity", "workbuddy/auths", "workbuddy/data", "aistudio/data", "qoder/accounts", "qoder/logs", "qoder/usage"):
         (ROOT / "runtime" / folder).mkdir(mode=0o700, parents=True, exist_ok=True)
     pathlib.Path(values["ANTIGRAVITY_DATA_DIR"]).mkdir(mode=0o700, parents=True, exist_ok=True)
+    # qoder2api-hub generates a random API key on first start and prints it to the
+    # container log; we pin it up front so stack.env is the single source of truth.
+    # The panel password is hashed into accounts/settings.json by qoder_settings at
+    # container start (see the compose command), never stored in plain text there.
+    qoder_settings = ROOT / "runtime/qoder/accounts/settings.json"
+    if not qoder_settings.exists():
+        private_write(qoder_settings, json.dumps({"api_key": values["QODER_API_KEY"]}, indent=2) + "\n")
     workbuddy = ROOT / "runtime/workbuddy/config.json"
     if not workbuddy.exists():
         config = {
@@ -158,6 +168,10 @@ def write_local_access(values):
         f"AI Studio (Playground): http://127.0.0.1:{port['aistudio']}",
         f"管理密码: {values['AISTUDIO_ADMIN_PASSWORD']}（用户名 {values.get('AISTUDIO_ADMIN_USER', 'admin')}）",
         f"API Key: {values['AISTUDIO_API_KEY']}",
+        "",
+        f"Qoder2API: http://127.0.0.1:{port['qoder']}",
+        f"面板密码: {values['QODER_PANEL_PASSWORD']}",
+        f"API Key: {values['QODER_API_KEY']}",
         "",
         "一键启动: 在项目根目录执行 bash start.sh all；也可单独执行 bash start.sh aistudio。",
         "Windows 入口: install.cmd、start.cmd、status.cmd、check.cmd、open-aistudio.cmd；全部网关监听 0.0.0.0。",
@@ -327,6 +341,18 @@ def aistudio_console_status(values, timeout=20):
 
 def wait_service(name, values, seconds=180):
     base = service_url(name, values)
+    if name == "qoder":
+        # qoder2api-hub serves /ping unauthenticated and /health with pool telemetry.
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                with HTTP.open(base + "/ping", timeout=3) as response:
+                    if response.status == 200:
+                        return
+            except OSError:
+                pass
+            time.sleep(1)
+        raise ValueError(f"qoder did not answer at {base}/ping within {seconds}s; inspect compose logs")
     if name == "aistudio":
         # The Playground proxy exposes an SPA root and no /health endpoint.
         deadline = time.monotonic() + seconds
@@ -434,6 +460,14 @@ def check(name, values, model=None, stream=False):
         summary = aistudio_console_status(values)
         print(f"AI Studio console: {summary['readyAccounts']}/{summary['totalAccounts']} account(s) ready "
               f"({summary['state']}).", flush=True)
+    if name == "qoder" and model:
+        # The gateway advertises its catalog before any Qoder account exists, so a
+        # model list alone proves nothing about generation. Readiness needs a pool.
+        health = request(base + "/health")
+        ready = health.get("accounts_ready")
+        if type(ready) is not int or ready < 1:
+            total = health.get("accounts")
+            raise ValueError(f"qoder has no ready Qoder account ({ready}/{total}); add one in the panel before testing generation")
     if model:
         verify_generation(base, key, model, stream)
         print(f"{name}: real {'streaming' if stream else 'non-streaming'} generation PASS (PROXY_KIT_OK)", flush=True)
