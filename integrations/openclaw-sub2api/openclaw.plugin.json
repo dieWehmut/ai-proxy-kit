@@ -2,7 +2,7 @@
   "id": "sub2api-auto",
   "name": "Sub2API Group Model Sync",
   "description": "Use the current API key group model for each Sub2API agent turn.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "providers": ["sub2api"],
   "activation": { "onStartup": true },
   "setup": { "providers": [{ "id": "sub2api", "envVars": ["SUB2API_API_KEY"] }] },
