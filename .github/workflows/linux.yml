@@ -19,9 +19,27 @@ jobs:
           docker compose --env-file runtime/stack.env --profile '*' config --format json > /tmp/proxy-kit-compose.json
           python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/proxy-kit-compose.json'))
-          for name in ('antigravity','workbuddy','sub2api','aistudio'):
-              assert all(p['host_ip']=='0.0.0.0' for p in d['services'][name]['ports'])
-          for name in ('postgres','redis'):
-              assert not d['services'][name].get('ports')
+
+          with open('/tmp/proxy-kit-compose.json') as config:
+              services = json.load(config)['services']
+
+          expected_ports = {
+              'antigravity': 8045,
+              'workbuddy': 7863,
+              'sub2api': 8080,
+              'aistudio': 2048,
+          }
+          for name, port in expected_ports.items():
+              ports = services[name].get('ports') or []
+              assert len(ports) == 1, f'{name} must publish exactly one port'
+              published = ports[0]
+              assert published.get('host_ip') == '0.0.0.0', f'{name} must bind 0.0.0.0'
+              assert str(published.get('published')) == str(port), f'{name} must publish {port}'
+              assert published.get('target') == port, f'{name} must forward to {port}'
+
+          image = services['aistudio'].get('image', '')
+          assert 'aistudio2api' in image, f'AI Studio must use the aistudio2api image, got {image!r}'
+
+          for name in ('postgres', 'redis'):
+              assert not services[name].get('ports'), f'{name} ports must stay internal'
           PY

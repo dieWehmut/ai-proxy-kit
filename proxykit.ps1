@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('install', 'start', 'stop', 'status', 'check')][string]$Action = 'start',
+    [ValidateSet('install', 'start', 'stop', 'status', 'check', 'access')][string]$Action = 'start',
     [ValidateSet('all', 'antigravity', 'workbuddy', 'sub2api', 'aistudio')][string]$Service = 'all',
     [string]$Distribution = '',
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Options

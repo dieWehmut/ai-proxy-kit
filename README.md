@@ -1,17 +1,18 @@
 # AI Proxy Kit
 
-统一管理 **Antigravity Manager、WorkBuddy2API、Sub2API**，另提供选定的
-**AIStudioToAPI** 可选入口。所有对外网关明确监听并发布 **`0.0.0.0`**。
+统一管理 **Antigravity Manager (agy)、WorkBuddy2API、AIStudio2API 和 Sub2API**
+四个服务。AI Studio 使用 AIStudio2API 的 Playground 通道；Build 通道已停用。
+所有对外网关明确监听并发布 **`0.0.0.0`**。
 
 支持 Linux AMD64 / ARM64、WSL2，以及 Windows 双击调用 WSL。
 保留原 `sub2api-windows-installer` 的 Git 历史和 Windows 原生安装器。
 
 | 服务 | 默认端口 | 本机页面 | 镜像版本 |
 | --- | --- | --- | --- |
-| Antigravity | 8045 | `http://localhost:8045` | `lbjlaq/antigravity-manager:v5.0.3` |
-| WorkBuddy | 7863 | `http://localhost:7863/panel/` | `ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0` |
+| antigravity (Antigravity / agy) | 8045 | `http://localhost:8045` | `lbjlaq/antigravity-manager:v5.0.3` |
+| workbuddy (WorkBuddy2API) | 7863 | `http://localhost:7863/panel/` | `ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0` |
+| aistudio (Playground) | 2048 | `http://localhost:2048` | `ghcr.io/mag1cfall/aistudio2api:latest` |
 | sub2api | 8080 | `http://localhost:8080` | `weishaw/sub2api:0.2.23` |
-| AI Studio（可选） | 7860 | `http://localhost:7860` | `ibuhub/aistudio-to-api:v1.4.1` |
 
 `0.0.0.0` 是监听地址。客户端使用 `localhost` 或主机 IP。
 PostgreSQL / Redis 仅供 Compose 网络中的 sub2api 使用，不发布数据库端口。
@@ -24,7 +25,7 @@ cd ai-proxy-kit
 bash install.sh all
 ```
 
-`all` 包含前三项服务。首次运行生成独立随机密钥，保存在仅当前用户可读的
+`all` 包含上述四项服务。首次运行生成独立随机密钥，保存在仅当前用户可读的
 `runtime/stack.env`。账号、程序配置和命名卷均持久化；重跑不重置密钥。
 Python 3 / curl 缺失时，Linux 启动器通过 apt/dnf 安装。
 需要安装 Docker Engine 时，显式使用官方 Linux 安装脚本：
@@ -39,13 +40,14 @@ Docker daemon 无法访问镜像源时，会尝试用经过校验的 `crane` 经
 日常启动复用本机镜像，不自动升级。
 
 ```bash
-# 单项安装，AI Studio 为可选服务。
+# 单项安装。
 bash install.sh antigravity
 bash install.sh workbuddy
 bash install.sh sub2api
 bash install.sh aistudio
 
 # 一键启动、停止、状态、检查。
+bash start.sh aistudio
 bash start.sh all
 bash stop.sh all
 bash status.sh
@@ -62,11 +64,14 @@ bash check.sh antigravity --model gemini-3.8-flash-low
 
 双击 `install.cmd`、`start.cmd`、`stop.cmd`、`status.cmd`。
 统一入口调用 WSL 中同一套 Linux 脚本；仓库可保存在 Windows 或 WSL UNC 目录。
+AI Studio 安装与验收见 [Windows 本机安装 AI Studio Playground](docs/WINDOWS_AISTUDIO_INSTALL.md)；
+`open-aistudio.cmd` 会刷新本机访问提示并打开 AI Studio Playground 控制台。
 
 ```powershell
 .\proxykit.ps1 -Action install -Service all -Distribution Ubuntu-22.04
 .\proxykit.ps1 -Action start -Service antigravity -Distribution Ubuntu-22.04
 .\proxykit.ps1 -Action status
+.\proxykit.ps1 -Action access   # regenerate runtime/LOCAL_ACCESS.txt and runtime/open-aistudio.html
 ```
 
 也可以下载 [脚本压缩包](https://github.com/dieWehmut/ai-proxy-kit/archive/refs/heads/main.zip)，
@@ -84,10 +89,24 @@ bash check.sh antigravity --model gemini-3.8-flash-low
 - Antigravity：用 `ANTIGRAVITY_WEB_PASSWORD` 登录并添加账号。启动器自动启用反代和自动启动；新账号先刷新配额。
 - WorkBuddy：进入 `/panel/`，使用 `WORKBUDDY_API_KEY` 管理本人账号。默认关闭积分任务排程。
 - sub2api：用 `SUB2API_EMAIL` / `SUB2API_PASSWORD` 登录。首次在页面确认上游管理员承诺；标准计费模式需要正余额。
-- AI Studio：控制台密码为 `AISTUDIO_WEB_PASSWORD`，API Key 为 `AISTUDIO_API_KEY`；通过控制台 VNC 完成本人 Google 登录。
+- AI Studio（Playground）：服务名 `aistudio`，容器端口和默认宿主端口都是 `2048`。
+  管理登录用户名为 `AISTUDIO_ADMIN_USER`（默认 `admin`），密码为
+  `AISTUDIO_ADMIN_PASSWORD`；客户端 API Key 为 `AISTUDIO_API_KEY`，Compose 将它映射为
+  容器内的 `PROXY_API_KEY`。`AISTUDIO_CHANNELS=playground` 固定使用 Playground 通道，
+  数据保存在 `runtime/aistudio/data`。容器内没有 `/health`；`/api/status` 的 `RUNNING`
+  和可用账号计数才是账号就绪的判据。
 
-本机浏览器已经登录 Google 时，可以直接[导出并复用现有会话](docs/AISTUDIO_LOCAL_LOGIN.md)，
-导入脚本会通知现有 AI Studio 重载。
+AI Studio 需要有效的 Google 会话。浏览器已经登录 Google 时，可导出 Playwright
+storage-state JSON，再通过 Windows 入口导入；本仓库的 Compose 服务把
+`runtime/aistudio/data` 挂载为容器内 `/data`，因此显式传入同一目录：
+
+```powershell
+.\import-aistudio2api-session.cmd -DataDir .\runtime\aistudio\data
+```
+
+导入入口不会打印 Cookie 或会话正文。成功后删除 Downloads 中的导出副本和临时的
+`runtime/aistudio/data/session.json`；`runtime/` 已被忽略，不得提交。完整命令和验收判据见
+[AIStudio2API 部署手册](docs/AISTUDIO2API.md)。
 
 已有账号可显式接入；Windows 目录在 WSL 下使用 `/mnt/c/`、`/mnt/d/` 路径：
 
@@ -140,7 +159,8 @@ AI Studio 用 `--provider aistudio` 单独接入。固定 Chat Completions
 
 ```bash
 # 本机已有实例时换一组端口；仍全部发布到 0.0.0.0。
-bash install.sh all --antigravity-port 18045 --workbuddy-port 17863 --sub2api-port 18080
+bash install.sh all --antigravity-port 18045 --workbuddy-port 17863 \
+  --aistudio-port 12048 --sub2api-port 18080
 python3 -m unittest discover -s tests -p 'test_*.py'
 bash -n *.sh
 ```
@@ -149,13 +169,19 @@ bash -n *.sh
 sub2api 的 Docker 命名卷；只复制脚本不会迁移账号。
 WSL2 NAT 下，从局域网经 Windows IP 访问仍取决于 Windows 转发和防火墙。
 
+AI Studio 的模型 ID 以本次 `/v1/models` 返回为准，不要沿用历史文档或旧容器中的名称。
+`check.sh aistudio` 验证匿名请求被拒绝、带 key 请求成功和模型列表非空；
+`check.sh aistudio --model <当前模型 ID>` 还会登录管理端检查 Playground 账号状态并做一次
+真实生成。
+
 GitHub Actions 检查 Linux 配置、凭据保留、网关绑定地址，以及 Windows PowerShell 5.1 / 7。
-真实结果见 [WSL 验收记录](docs/VALIDATION.md)。AI Studio 的选择依据见 [方案比较](docs/AISTUDIO_COMPARISON.md)。
+真实结果见 [WSL 验收记录](docs/VALIDATION.md)；AI Studio 的当前迁移证据和端口对应关系见
+[Playground 迁移验证](docs/validation/aistudio-playground-migration-20261125.md)。
 
 ## 来源
 
 本仓库脚本沿用 [MIT](LICENSE)。上游程序分别来自
 [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)、
 [WorkBuddy2API Panel](https://github.com/linguo2625469/workbuddy2api-panel)、
-[Sub2API](https://github.com/Wei-Shaw/sub2api)、[AIStudioToAPI](https://github.com/iBUHub/AIStudioToAPI)，
-各自遵循其许可证。其中 AIStudioToAPI 使用 CC BY-NC 4.0；部署入口不改变上游授权。
+[Sub2API](https://github.com/Wei-Shaw/sub2api)、[AIStudio2API](https://github.com/mag1cfall/AIStudio2API)，
+各自遵循其许可证；部署入口不改变上游授权。

@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import http.cookiejar
 import json
 import os
 import pathlib
@@ -16,19 +17,20 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVICES = ("antigravity", "workbuddy", "sub2api")
+SERVICES = ("antigravity", "workbuddy", "sub2api", "aistudio")
 DEFAULTS = {
-    "ANTIGRAVITY_PORT": "8045", "WORKBUDDY_PORT": "7863", "SUB2API_PORT": "8080", "AISTUDIO_PORT": "7860",
+    "ANTIGRAVITY_PORT": "8045", "WORKBUDDY_PORT": "7863", "SUB2API_PORT": "8080", "AISTUDIO_PORT": "2048",
     "ANTIGRAVITY_IMAGE": "lbjlaq/antigravity-manager:v5.0.3",
     "WORKBUDDY_IMAGE": "ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0",
     "SUB2API_IMAGE": "weishaw/sub2api:0.2.23",
-    "AISTUDIO_IMAGE": "ibuhub/aistudio-to-api:v1.4.1",
+    "AISTUDIO_IMAGE": "ghcr.io/mag1cfall/aistudio2api:latest",
     "SUB2API_EMAIL": "admin@sub2api.local", "UPSTREAM_PROXY": "", "TZ": "Asia/Shanghai",
 }
-SECRET_KEYS = ("ANTIGRAVITY_API_KEY", "ANTIGRAVITY_WEB_PASSWORD", "WORKBUDDY_API_KEY", "AISTUDIO_API_KEY", "AISTUDIO_WEB_PASSWORD",
+SECRET_KEYS = ("ANTIGRAVITY_API_KEY", "ANTIGRAVITY_WEB_PASSWORD", "WORKBUDDY_API_KEY", "AISTUDIO_API_KEY", "AISTUDIO_ADMIN_PASSWORD",
                "SUB2API_PASSWORD", "POSTGRES_PASSWORD", "REDIS_PASSWORD", "JWT_SECRET", "TOTP_ENCRYPTION_KEY")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -83,11 +85,18 @@ def initialize(args):
                 values.setdefault(name, old[old_name])
     for key, value in DEFAULTS.items():
         values.setdefault(key, value)
+    # Migration from the retired Build-channel deployment: same secrets under
+    # new names, and the console port moved from 7860 to the Playground 2048.
+    if values.get("AISTUDIO_WEB_PASSWORD") and not values.get("AISTUDIO_ADMIN_PASSWORD"):
+        values["AISTUDIO_ADMIN_PASSWORD"] = values["AISTUDIO_WEB_PASSWORD"]
+    values.pop("AISTUDIO_WEB_PASSWORD", None)
+    if values.get("AISTUDIO_PORT") == "7860":
+        values["AISTUDIO_PORT"] = DEFAULTS["AISTUDIO_PORT"]
     for key in SECRET_KEYS:
         if not values.get(key):
             values[key] = secrets.token_hex(32)
-    for name in (*SERVICES, "aistudio"):
-        port = getattr(args, name + "_port")
+    for name in SERVICES:
+        port = getattr(args, name + "_port", None)
         if port is not None:
             values[name.upper() + "_PORT"] = str(port)
     if args.upstream_proxy is not None:
@@ -97,11 +106,11 @@ def initialize(args):
     values.setdefault("ANTIGRAVITY_DATA_DIR", str(ROOT / "runtime/antigravity"))
     values.setdefault("LOCAL_UID", str(os.getuid()))
     values.setdefault("LOCAL_GID", str(os.getgid()))
-    ports = [int(values[name.upper() + "_PORT"]) for name in (*SERVICES, "aistudio")]
+    ports = [int(values[name.upper() + "_PORT"]) for name in SERVICES]
     if len(set(ports)) != len(ports) or any(not 1 <= p <= 65535 for p in ports):
         raise ValueError("Gateway ports must be distinct numbers between 1 and 65535")
     save_env(args.env_file, values)
-    for folder in ("antigravity", "workbuddy/auths", "workbuddy/data", "aistudio/auth", "aistudio/data"):
+    for folder in ("antigravity", "workbuddy/auths", "workbuddy/data", "aistudio/data"):
         (ROOT / "runtime" / folder).mkdir(mode=0o700, parents=True, exist_ok=True)
     pathlib.Path(values["ANTIGRAVITY_DATA_DIR"]).mkdir(mode=0o700, parents=True, exist_ok=True)
     workbuddy = ROOT / "runtime/workbuddy/config.json"
@@ -127,6 +136,41 @@ def initialize(args):
         print(f"Imported {copied} WorkBuddy account files; source files unchanged.", flush=True)
     print(f"Configuration ready: {args.env_file} (mode 600); existing keys retained.", flush=True)
     return values
+
+
+def write_local_access(values):
+    """Regenerate local access hints from stack.env so they never drift."""
+    port = {name: values.get(name.upper() + "_PORT", DEFAULTS[name.upper() + "_PORT"]) for name in SERVICES}
+    lines = [
+        "AI Proxy Kit - 本机访问（本文件含密钥，请只在本机查看）",
+        "",
+        f"Sub2API: http://127.0.0.1:{port['sub2api']}",
+        f"管理员邮箱: {values.get('SUB2API_EMAIL', 'admin@sub2api.local')}",
+        f"管理员密码: {values['SUB2API_PASSWORD']}",
+        "",
+        f"WorkBuddy: http://127.0.0.1:{port['workbuddy']}/panel/",
+        f"API / 管理 Key: {values['WORKBUDDY_API_KEY']}",
+        "",
+        f"Antigravity: http://127.0.0.1:{port['antigravity']}",
+        f"管理密码: {values['ANTIGRAVITY_WEB_PASSWORD']}",
+        f"API Key: {values['ANTIGRAVITY_API_KEY']}",
+        "",
+        f"AI Studio (Playground): http://127.0.0.1:{port['aistudio']}",
+        f"管理密码: {values['AISTUDIO_ADMIN_PASSWORD']}（用户名 {values.get('AISTUDIO_ADMIN_USER', 'admin')}）",
+        f"API Key: {values['AISTUDIO_API_KEY']}",
+        "",
+        "一键启动: 在项目根目录执行 bash start.sh all；也可单独执行 bash start.sh aistudio。",
+        "Windows 入口: install.cmd、start.cmd、status.cmd、check.cmd、open-aistudio.cmd；全部网关监听 0.0.0.0。",
+    ]
+    private_write(ROOT / "runtime/LOCAL_ACCESS.txt", "\n".join(lines) + "\n")
+    console = (
+        '<!doctype html><html lang="zh"><meta charset="utf-8">'
+        '<title>本机 AI Studio 控制台</title>'
+        '<p>正在打开本机 AI Studio（Playground）控制台…</p>'
+        f'<script>location.replace("http://127.0.0.1:{port["aistudio"]}/")</script>'
+        f'<p><a href="http://127.0.0.1:{port["aistudio"]}/">手动打开</a></p></html>'
+    )
+    private_write(ROOT / "runtime/open-aistudio.html", console)
 
 
 def run(command, **kwargs):
@@ -232,8 +276,72 @@ def service_url(name, values):
     return "http://127.0.0.1:" + values[name.upper() + "_PORT"]
 
 
+def aistudio_account_status(data):
+    """Return secret-free readiness details from an authenticated /api/status response."""
+    if not isinstance(data, dict):
+        raise ValueError("AI Studio status response must be an object")
+    state = data.get("state")
+    running = data.get("running")
+    accounts = data.get("accounts")
+    if not isinstance(state, str) or not isinstance(running, bool):
+        raise ValueError("AI Studio status response requires string state and boolean running")
+    if not running:
+        raise ValueError(f"AI Studio generation service is {state}; start it from the console")
+    if not isinstance(accounts, dict):
+        raise ValueError("AI Studio status response requires an accounts object")
+    ready = accounts.get("ready")
+    total = accounts.get("total")
+    if type(ready) is not int or type(total) is not int or ready < 0 or total < 0:
+        raise ValueError("AI Studio status response has invalid account counters")
+    if ready < 1:
+        raise ValueError("AI Studio has no ready Google account; import a signed-in session first")
+    return {"state": state, "readyAccounts": ready, "totalAccounts": total}
+
+
+def aistudio_console_status(values, timeout=20):
+    """Log in with AISTUDIO_ADMIN_PASSWORD and inspect /api/status without exposing the password."""
+    password = values.get("AISTUDIO_ADMIN_PASSWORD")
+    if not password:
+        raise ValueError("AI Studio admin password is missing; run install.sh to create AISTUDIO_ADMIN_PASSWORD")
+    username = values.get("AISTUDIO_ADMIN_USER") or "admin"
+    base = service_url("aistudio", values).rstrip("/")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    body = json.dumps({"username": username, "password": password}).encode()
+    login = urllib.request.Request(base + "/api/auth/login", data=body,
+                                   headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with opener.open(login, timeout=timeout) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise ValueError("AI Studio admin login failed; check AISTUDIO_ADMIN_USER/AISTUDIO_ADMIN_PASSWORD") from None
+        raise
+    with opener.open(base + "/api/status", timeout=timeout) as response:
+        try:
+            data = json.load(response)
+        except (UnicodeError, json.JSONDecodeError):
+            raise ValueError("AI Studio status response must be valid JSON") from None
+    return aistudio_account_status(data)
+
+
 def wait_service(name, values, seconds=180):
     base = service_url(name, values)
+    if name == "aistudio":
+        # The Playground proxy exposes an SPA root and no /health endpoint.
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                with HTTP.open(base + "/", timeout=3) as response:
+                    if response.status < 500:
+                        return
+            except urllib.error.HTTPError as error:
+                if error.code < 500:
+                    return
+            except OSError:
+                pass
+            time.sleep(1)
+        raise ValueError(f"aistudio did not answer at {base} within {seconds}s; inspect compose logs")
     path = "/healthz" if name == "workbuddy" else "/health"
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -303,6 +411,8 @@ def verify_generation(base, key, model, stream=False):
 def check(name, values, model=None, stream=False):
     wait_service(name, values, seconds=10)
     if name == "sub2api":
+        if model:
+            raise ValueError("Use connect.sh --provider aistudio --test --model to verify Sub2API routed generation")
         print("sub2api health: PASS (use scripts/connect-sub2api.py --test to test routed generation)")
         return
     key = values[name.upper() + "_API_KEY"]
@@ -315,10 +425,15 @@ def check(name, values, model=None, stream=False):
     else:
         raise ValueError(f"{name} did not reject an unauthenticated model-list request")
     models = request(base + "/v1/models", key).get("data", [])
+    if not models:
+        raise ValueError(f"{name} returned an empty model list; authorize an account first")
+    if model and model not in {item["id"] for item in models}:
+        raise ValueError(f"{name} does not advertise the requested model {model}")
     print(f"{name}: auth PASS; {len(models)} model(s).", flush=True)
-    if name == "aistudio":
-        health = request(base + "/health")
-        print(f"AI Studio browserConnected={health.get('browserConnected')}; complete Google login in its Web/VNC UI.", flush=True)
+    if name == "aistudio" and model:
+        summary = aistudio_console_status(values)
+        print(f"AI Studio console: {summary['readyAccounts']}/{summary['totalAccounts']} account(s) ready "
+              f"({summary['state']}).", flush=True)
     if model:
         verify_generation(base, key, model, stream)
         print(f"{name}: real {'streaming' if stream else 'non-streaming'} generation PASS (PROXY_KIT_OK)", flush=True)
@@ -326,8 +441,8 @@ def check(name, values, model=None, stream=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("install", "start", "stop", "status", "check"))
-    parser.add_argument("service", nargs="?", default="all", choices=(*SERVICES, "aistudio", "all"))
+    parser.add_argument("command", choices=("install", "start", "stop", "status", "check", "access"))
+    parser.add_argument("service", nargs="?", default="all", choices=(*SERVICES, "all"))
     parser.add_argument("--env-file", type=pathlib.Path, default=ROOT / "runtime/stack.env")
     parser.add_argument("--prepare-only", action="store_true", help="Generate configuration without Docker or network changes")
     parser.add_argument("--install-docker", action="store_true", help="Handled by the Linux install.sh bootstrap")
@@ -339,7 +454,7 @@ def main():
     parser.add_argument("--upstream-proxy", help="Optional outbound proxy reachable from the containers")
     parser.add_argument("--model", help="check: additionally make a real generation request")
     parser.add_argument("--stream", action="store_true", help="check: verify content and [DONE] in a real SSE response")
-    for name in (*SERVICES, "aistudio"):
+    for name in SERVICES:
         parser.add_argument("--" + name + "-port", type=int)
     args = parser.parse_args()
     args.env_file = args.env_file.expanduser().resolve()
@@ -360,6 +475,10 @@ def main():
         for name in services:
             check(name, values, args.model, args.stream)
         return
+    if args.command == "access":
+        write_local_access(values)
+        print(ROOT / "runtime/open-aistudio.html")
+        return
     docker = docker_command()
     compose(docker, args, values, "config", "--quiet")
     if args.command in ("install", "start"):
@@ -369,6 +488,7 @@ def main():
             wait_service(name, values)
         if "antigravity" in services:
             enable_antigravity(values)
+        write_local_access(values)
         for name in services:
             print(f"{name}: listening on 0.0.0.0:{values[name.upper() + '_PORT']}; local URL {service_url(name, values)}", flush=True)
         print(f"Credentials stay in {args.env_file}; no secrets are printed.", flush=True)

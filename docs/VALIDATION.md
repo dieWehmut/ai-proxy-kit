@@ -1,5 +1,10 @@
 # WSL 验收记录
 
+> **AI Studio 历史：Build 通道已停用。** 下表中 2026-11-20 的 7860、Web/VNC 和
+> `browserConnected` 记录只保留作历史证据，不代表当前 Playground 服务。当前迁移实测和
+> 端口说明见
+> [Playground 迁移验证](validation/aistudio-playground-migration-20261125.md)。
+
 环境：2026-11-20，Ubuntu 22.04 / WSL2，ARM64，Docker 29.3.0。
 这些结果来自本机真实运行，不代替其他网络或新账号环境的验收。
 
@@ -8,21 +13,21 @@
 | Antigravity | 监听 `0.0.0.0:18045`，容器 healthy，管理/API 鉴权正常，本地账号已导入 |
 | WorkBuddy | 监听 `0.0.0.0:17863`，容器 healthy，3 个本人账号，59 个模型 |
 | sub2api | 监听 `0.0.0.0:18080`，容器 healthy，PostgreSQL/Redis 独立命名卷 |
-| AI Studio | 监听 `0.0.0.0:7860`，容器 healthy，网页 HTTP 200；无密钥 401，鉴权后列出 31 个模型 |
+| AI Studio（历史：Build 通道已停用） | 监听 `0.0.0.0:7860`，容器 healthy，网页 HTTP 200；无密钥 401，鉴权后列出 31 个模型 |
 | WorkBuddy 普通生成 | `cn:hy4flash-free` 返回 `PROXY_KIT_OK` |
 | WorkBuddy 流式生成 | 内容匹配并收到 `[DONE]` |
 | sub2api → WorkBuddy 普通生成 | 独立分组、API Key 转发成功，返回 `PROXY_KIT_OK` |
 | sub2api → WorkBuddy 流式生成 | 独立调用 Key 的 SSE 内容匹配，收到 `[DONE]`；重复执行没有新建重复账号 |
 | Windows → WSL → sub2api → WorkBuddy | Windows 原生 curl 经 `localhost:18080` 调用，真实生成返回 `PROXY_KIT_OK` |
-| sub2api → AI Studio 配置 | 已创建独立分组和上游账号，容器网络使用 `http://aistudio:7860`；生成仍待登录 |
+| sub2api → AI Studio 配置（历史：Build 通道已停用） | 已创建独立分组和上游账号，容器网络使用 `http://aistudio:7860`；生成仍待登录 |
 | sub2api 启停后持久化 | 使用 stop/start 停止并重启数据库、Redis 和服务后，原账号、分组、调用 Key 仍有效，流式转发复测通过 |
 | Antigravity 上游生成 | Google 返回 `403 UNSUPPORTED_LOCATION`；Windows 原生网络、显式出站代理和 WSL 直连上游均复现；不判为通过 |
-| AI Studio 生成 | 出站代理已启用，Web/VNC 正常打开 Google 页面；本人 Google 登录尚未完成，`browserConnected=false` |
+| AI Studio 生成（历史：Build 通道已停用） | 出站代理已启用，Web/VNC 正常打开 Google 页面；本人 Google 登录尚未完成，`browserConnected=false` |
 | 配置回归 | 7 项检查通过，包括保留已有凭据、账号和未知配置，拒绝端口冲突，以及保留 WorkBuddy 构建期间修改的镜像设置 |
 | Windows 入口 | PowerShell 5.1 原生函数检查全部通过，统一 WSL `status` 入口真实调用成功 |
 
 本机已有旧实例，因此统一测试栈使用备用端口；发布脚本的默认端口仍是
-`8045`、`7863`、`8080`、`7860`，所有网关固定发布到 `0.0.0.0`。
+`8045`、`7863`、`2048`、`8080`，所有网关固定发布到 `0.0.0.0`。
 
 ## 修正与明确限制
 
@@ -47,3 +52,14 @@ bash status.sh
 bash check.sh workbuddy --model cn:hy4flash-free --stream
 bash connect.sh --provider workbuddy --test --model cn:hy4flash-free --stream
 ```
+
+## AI Studio Playground 迁移
+
+7860 的 Build 通道已于 2026-10-30 被上游关闭，仓库的 `aistudio` Compose 服务现在运行
+AIStudio2API Playground，容器端口 `2048`。2026-11-25 的 LXC 实测完成了同一 Google 会话
+的 Playground 导入，`gemini-4-hydrogen` 和 `gemini-3.8-flash` 的非流式生成返回
+`PROXY_KIT_OK`。LXC 的 `7870` 是宿主机发布端口，与仓库 Compose 的容器端口 `2048` 不同。
+
+当前操作、端口映射和验收判据见
+[AI Studio Playground 迁移验证](validation/aistudio-playground-migration-20261125.md)，
+部署入口见 [AIStudio2API 部署手册](AISTUDIO2API.md)。

@@ -1,13 +1,16 @@
 """Regression checks for credential preservation and safe command construction."""
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import io
 import json
 import pathlib
 import stat
+import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -65,6 +68,38 @@ class ConfigurationTests(unittest.TestCase):
                 kit.initialize(args)
             self.assertFalse(args.env_file.exists())
 
+    def test_aistudio_is_part_of_all_and_defaults_do_not_require_its_port_argument(self):
+        self.assertIn("aistudio", kit.SERVICES)
+        self.assertEqual(len(kit.SERVICES), len(set(kit.SERVICES)))
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(kit, "ROOT", pathlib.Path(folder)):
+            args = self.args(pathlib.Path(folder))
+            delattr(args, "aistudio_port")
+            values = kit.initialize(args)
+            self.assertEqual(values["AISTUDIO_PORT"], kit.DEFAULTS["AISTUDIO_PORT"])
+            self.assertEqual(values["AISTUDIO_IMAGE"], kit.DEFAULTS["AISTUDIO_IMAGE"])
+            self.assertTrue(values["AISTUDIO_API_KEY"])
+            self.assertTrue(values["AISTUDIO_ADMIN_PASSWORD"])
+
+    def test_start_all_targets_aistudio(self):
+        with tempfile.TemporaryDirectory() as folder:
+            env = pathlib.Path(folder) / "stack.env"
+            values = {name.upper() + "_PORT": str(18045 + index)
+                      for index, name in enumerate(kit.SERVICES)}
+            values.update({key: "fixture" for key in kit.SECRET_KEYS})
+            kit.save_env(env, values)
+            with mock.patch.object(kit, "docker_command", return_value=["docker"]), \
+                    mock.patch.object(kit, "compose") as compose, \
+                    mock.patch.object(kit, "ensure_images") as images, \
+                    mock.patch.object(kit, "wait_service"), \
+                    mock.patch.object(kit, "enable_antigravity"), \
+                    mock.patch.object(kit, "write_local_access"), \
+                    mock.patch.object(kit, "service_url", return_value="http://127.0.0.1"), \
+                    mock.patch.object(sys, "argv", ["proxykit.py", "start", "all", "--env-file", str(env)]):
+                kit.main()
+            self.assertEqual(images.call_args.args[3], list(kit.SERVICES))
+            up = [call.args for call in compose.call_args_list if "up" in call.args]
+            self.assertEqual(up[0][-len(kit.SERVICES):], tuple(kit.SERVICES))
+
     def test_env_roundtrip_is_data_and_never_shell_code(self):
         with tempfile.TemporaryDirectory(prefix="space ") as folder:
             path = pathlib.Path(folder) / "settings.env"
@@ -74,6 +109,33 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text("TOKEN=a\nTOKEN=b\n")
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 kit.read_env(path)
+
+class LocalAccessTests(unittest.TestCase):
+    def args(self, root):
+        return argparse.Namespace(env_file=root / "runtime/stack.env", import_antigravity=None,
+                                  antigravity_data=None, import_workbuddy=None, upstream_proxy=None,
+                                  **{name + "_port": None for name in (*kit.SERVICES, "aistudio")})
+
+    def test_access_hints_follow_stack_env_without_leaking_into_git(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(kit, "ROOT", pathlib.Path(folder)):
+            root = pathlib.Path(folder)
+            values = kit.initialize(self.args(root))
+            values["AISTUDIO_PORT"] = "17860"
+            values["AISTUDIO_ADMIN_PASSWORD"] = "rotated-console-password"
+            kit.write_local_access(values)
+            hints = (root / "runtime/LOCAL_ACCESS.txt").read_text()
+            console = (root / "runtime/open-aistudio.html").read_text()
+            self.assertIn(values["AISTUDIO_API_KEY"], hints)
+            self.assertIn("rotated-console-password", hints)
+            self.assertIn("用户名 admin", hints)
+            self.assertIn("http://127.0.0.1:17860/", console)
+            self.assertNotIn("/login", console)
+            self.assertNotIn("rotated-console-password", console)
+            self.assertEqual(stat.S_IMODE((root / "runtime/LOCAL_ACCESS.txt").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE((root / "runtime/open-aistudio.html").stat().st_mode), 0o600)
+            first = hints
+            kit.write_local_access(values)
+            self.assertEqual((root / "runtime/LOCAL_ACCESS.txt").read_text(), first)
 
     def test_workbuddy_build_retains_configuration_edited_while_checking_binary(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(kit, "ROOT", pathlib.Path(folder)), \
@@ -102,6 +164,39 @@ class GenerationChecks(unittest.TestCase):
     def opener(self, payload):
         return mock.Mock(open=mock.Mock(return_value=io.BytesIO(payload)))
 
+    def response(self, url, body=b""):
+        response = io.BytesIO(body)
+        response.geturl = mock.Mock(return_value=url)
+        return response
+
+    def aistudio_values(self):
+        return {"AISTUDIO_PORT": "2048", "AISTUDIO_API_KEY": "fixture-key",
+                "AISTUDIO_ADMIN_USER": "admin",
+                "AISTUDIO_ADMIN_PASSWORD": "synthetic-console-password"}
+
+    @staticmethod
+    def aistudio_status(**updates):
+        status = {"state": "RUNNING", "running": True,
+                  "accounts": {"total": 1, "ready": 1}}
+        status.update(updates)
+        return status
+
+    @contextlib.contextmanager
+    def aistudio_check(self, status_body, model="gemini-4-hydrogen", models=None):
+        base = "http://127.0.0.1:2048"
+        unauthorized = urllib.error.HTTPError(base + "/v1/models", 401, "Unauthorized", {}, None)
+        opener = mock.Mock()
+        opener.open.side_effect = [
+            self.response(base + "/api/auth/login", b'{"ok":true}'),
+            self.response(base + "/api/status", json.dumps(status_body).encode()),
+        ]
+        models = [{"id": model}] if models is None else models
+        with mock.patch.object(kit, "wait_service"), \
+                mock.patch.object(kit, "request", side_effect=[unauthorized, {"data": models}]) as request, \
+                mock.patch.object(kit.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(kit, "verify_generation") as generation:
+            yield opener, request, generation
+
     def test_stream_requires_content_and_termination(self):
         data = b'data: {"choices":[{"delta":{"content":"PROXY_"}}]}\n\ndata: {"choices":[{"delta":{"content":"KIT_OK"}}]}\n\ndata: [DONE]\n'
         with mock.patch.object(kit, "HTTP", self.opener(data)):
@@ -119,6 +214,89 @@ class GenerationChecks(unittest.TestCase):
         with mock.patch.object(kit, "HTTP", self.opener(empty)):
             with self.assertRaisesRegex(ValueError, "verification marker"):
                 kit.verify_generation("http://local-gateway", "fixture-key", "model", stream=True)
+
+    def test_sub2api_model_check_cannot_silently_skip_generation(self):
+        with mock.patch.object(kit, "wait_service"), mock.patch.object(kit, "verify_generation") as generation:
+            with self.assertRaisesRegex(ValueError, "connect.sh"):
+                kit.check("sub2api", {}, "gemini-4-hydrogen", stream=True)
+            generation.assert_not_called()
+
+    def test_aistudio_requires_the_advertised_model_before_console_login(self):
+        unauthorized = urllib.error.HTTPError("http://local-gateway", 401, "Unauthorized", {}, None)
+        scenarios = [
+            ([], "empty model list"),
+            ([{"id": "gemini-3-flash-preview"}], "does not advertise"),
+        ]
+        for models, message in scenarios:
+            with self.subTest(message=message), mock.patch.object(kit, "wait_service"), \
+                    mock.patch.object(kit, "request", side_effect=[unauthorized, {"data": models}]), \
+                    mock.patch.object(kit.urllib.request, "build_opener") as build, \
+                    mock.patch.object(kit, "verify_generation") as generation:
+                with self.assertRaisesRegex(ValueError, message):
+                    kit.check("aistudio", self.aistudio_values(), "gemini-4-hydrogen")
+                build.assert_not_called()
+                generation.assert_not_called()
+
+    def test_aistudio_model_check_logs_in_with_json_and_uses_ready_accounts(self):
+        values = self.aistudio_values()
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            with self.aistudio_check(self.aistudio_status()) as (opener, request, generation):
+                kit.check("aistudio", values, "gemini-4-hydrogen", stream=True)
+        generation.assert_called_once_with("http://127.0.0.1:2048", "fixture-key", "gemini-4-hydrogen", True)
+        login, status_request = opener.open.call_args_list
+        login_request = login.args[0]
+        self.assertEqual(login_request.full_url, "http://127.0.0.1:2048/api/auth/login")
+        self.assertEqual(login_request.get_method(), "POST")
+        self.assertEqual(login_request.get_header("Content-type"), "application/json")
+        self.assertEqual(json.loads(login_request.data),
+                         {"username": "admin", "password": values["AISTUDIO_ADMIN_PASSWORD"]})
+        self.assertNotIn(values["AISTUDIO_ADMIN_PASSWORD"], login_request.full_url)
+        self.assertEqual(status_request.args, ("http://127.0.0.1:2048/api/status",))
+        self.assertEqual([call.args[0] for call in request.call_args_list],
+                         ["http://127.0.0.1:2048/v1/models", "http://127.0.0.1:2048/v1/models"])
+        self.assertIn("1/1 account(s) ready (RUNNING)", output.getvalue())
+        self.assertNotIn(values["AISTUDIO_ADMIN_PASSWORD"], output.getvalue() + errors.getvalue())
+
+    def test_aistudio_rejects_unready_or_invalid_status_without_leaking_the_password(self):
+        cases = [
+            (self.aistudio_status(state="STOPPED", running=False), "generation service is STOPPED"),
+            (self.aistudio_status(accounts={"total": 1, "ready": 0}), "no ready Google account"),
+            (self.aistudio_status(accounts={"total": 1, "ready": "1"}), "invalid account counters"),
+            (self.aistudio_status(state=7), "requires string state"),
+        ]
+        password = self.aistudio_values()["AISTUDIO_ADMIN_PASSWORD"]
+        for status, message in cases:
+            with self.subTest(message=message):
+                with self.aistudio_check(status) as (_, _, generation):
+                    with self.assertRaisesRegex(ValueError, message) as raised:
+                        kit.check("aistudio", self.aistudio_values(), "gemini-4-hydrogen")
+                self.assertNotIn(password, str(raised.exception))
+                generation.assert_not_called()
+
+    def test_aistudio_console_login_failure_is_detected_without_leaking_the_password(self):
+        base = "http://127.0.0.1:2048"
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            base + "/api/auth/login", 401, "Unauthorized", {}, None)
+        unauthorized = urllib.error.HTTPError(base + "/v1/models", 401, "Unauthorized", {}, None)
+        with mock.patch.object(kit, "wait_service"), \
+                mock.patch.object(kit, "request", side_effect=[unauthorized, {"data": [{"id": "gemini-4-hydrogen"}]}]), \
+                mock.patch.object(kit.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(kit, "verify_generation") as generation:
+            with self.assertRaisesRegex(ValueError, "admin login failed") as raised:
+                kit.check("aistudio", self.aistudio_values(), "gemini-4-hydrogen")
+        self.assertNotIn(self.aistudio_values()["AISTUDIO_ADMIN_PASSWORD"], str(raised.exception))
+        self.assertEqual(opener.open.call_count, 1)
+        generation.assert_not_called()
+
+    def test_aistudio_auth_only_check_does_not_require_a_console_session(self):
+        unauthorized = urllib.error.HTTPError("http://local-gateway", 401, "Unauthorized", {}, None)
+        with mock.patch.object(kit, "wait_service"), \
+                mock.patch.object(kit, "request", side_effect=[unauthorized, {"data": [{"id": "gemini-4-hydrogen"}]}]), \
+                mock.patch.object(kit.urllib.request, "build_opener") as build:
+            kit.check("aistudio", self.aistudio_values())
+        build.assert_not_called()
 
 
 if __name__ == "__main__":
