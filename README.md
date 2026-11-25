@@ -100,6 +100,8 @@ AI Studio 安装与验收见 [Windows 本机安装 AI Studio Playground](docs/WI
   面板密码为 `QODER_PANEL_PASSWORD`（容器首启时哈希写入 `runtime/qoder/accounts/settings.json`），
   客户端 API Key 为 `QODER_API_KEY`（Compose 映射为容器内 `API_KEY`，不再由容器随机生成并打印到日志）。
   在面板「账号」页用 OAuth / PAT 添加 Qoder 账号；`/health` 的 `accounts_ready` ≥ 1 才能真实生成。
+  注意：上游镜像启动时会把 API Key 打印到容器日志（`docker logs qoder-proxy`）。kit 已把 Key 固定为
+  `stack.env` 里的值，所以日志泄露面等于本机 Docker 权限；轮换 Key 时同时改 `runtime/qoder/accounts/settings.json`。
 
 AI Studio 需要有效的 Google 会话。浏览器已经登录 Google 时，可导出 Playwright
 storage-state JSON，再通过 Windows 入口导入；本仓库的 Compose 服务把
