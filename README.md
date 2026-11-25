@@ -62,11 +62,14 @@ bash check.sh antigravity --model gemini-3.8-flash-low
 
 双击 `install.cmd`、`start.cmd`、`stop.cmd`、`status.cmd`。
 统一入口调用 WSL 中同一套 Linux 脚本；仓库可保存在 Windows 或 WSL UNC 目录。
+AI Studio 安装与验收见 [Windows 本机安装 AI Studio 反代](docs/WINDOWS_AISTUDIO_INSTALL.md)；
+`open-aistudio.cmd` 会从 `stack.env` 重新生成登录页并直接用默认浏览器打开。
 
 ```powershell
 .\proxykit.ps1 -Action install -Service all -Distribution Ubuntu-22.04
 .\proxykit.ps1 -Action start -Service antigravity -Distribution Ubuntu-22.04
 .\proxykit.ps1 -Action status
+.\proxykit.ps1 -Action access   # regenerate runtime/LOCAL_ACCESS.txt and the AI Studio login page
 ```
 
 也可以下载 [脚本压缩包](https://github.com/dieWehmut/ai-proxy-kit/archive/refs/heads/main.zip)，
