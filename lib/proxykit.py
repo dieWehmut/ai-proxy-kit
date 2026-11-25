@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import http.cookiejar
 import json
 import os
 import pathlib
@@ -16,16 +17,20 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVICES = ("antigravity", "workbuddy", "sub2api")
+SERVICES = ("antigravity", "workbuddy", "sub2api", "aistudio")
+ON_DEMAND_SERVICES = ("aistudio2api",)
 DEFAULTS = {
     "ANTIGRAVITY_PORT": "8045", "WORKBUDDY_PORT": "7863", "SUB2API_PORT": "8080", "AISTUDIO_PORT": "7860",
+    "AISTUDIO2API_PORT": "2048",
     "ANTIGRAVITY_IMAGE": "lbjlaq/antigravity-manager:v5.0.3",
     "WORKBUDDY_IMAGE": "ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0",
     "SUB2API_IMAGE": "weishaw/sub2api:0.2.23",
     "AISTUDIO_IMAGE": "ibuhub/aistudio-to-api:v1.4.1",
+    "AISTUDIO2API_IMAGE": "ghcr.io/mag1cfall/aistudio2api:latest",
     "SUB2API_EMAIL": "admin@sub2api.local", "UPSTREAM_PROXY": "", "TZ": "Asia/Shanghai",
 }
 SECRET_KEYS = ("ANTIGRAVITY_API_KEY", "ANTIGRAVITY_WEB_PASSWORD", "WORKBUDDY_API_KEY", "AISTUDIO_API_KEY", "AISTUDIO_WEB_PASSWORD",
@@ -86,8 +91,8 @@ def initialize(args):
     for key in SECRET_KEYS:
         if not values.get(key):
             values[key] = secrets.token_hex(32)
-    for name in (*SERVICES, "aistudio"):
-        port = getattr(args, name + "_port")
+    for name in SERVICES:
+        port = getattr(args, name + "_port", None)
         if port is not None:
             values[name.upper() + "_PORT"] = str(port)
     if args.upstream_proxy is not None:
@@ -97,7 +102,7 @@ def initialize(args):
     values.setdefault("ANTIGRAVITY_DATA_DIR", str(ROOT / "runtime/antigravity"))
     values.setdefault("LOCAL_UID", str(os.getuid()))
     values.setdefault("LOCAL_GID", str(os.getgid()))
-    ports = [int(values[name.upper() + "_PORT"]) for name in (*SERVICES, "aistudio")]
+    ports = [int(values[name.upper() + "_PORT"]) for name in SERVICES]
     if len(set(ports)) != len(ports) or any(not 1 <= p <= 65535 for p in ports):
         raise ValueError("Gateway ports must be distinct numbers between 1 and 65535")
     save_env(args.env_file, values)
@@ -131,7 +136,7 @@ def initialize(args):
 
 def write_local_access(values):
     """Regenerate local access hints from stack.env so they never drift."""
-    port = {name: values[name.upper() + "_PORT"] for name in (*SERVICES, "aistudio")}
+    port = {name: values.get(name.upper() + "_PORT", DEFAULTS[name.upper() + "_PORT"]) for name in SERVICES}
     lines = [
         "AI Proxy Kit - 本机访问（本文件含密钥，请只在本机查看）",
         "",
@@ -150,7 +155,7 @@ def write_local_access(values):
         f"控制台密码: {values['AISTUDIO_WEB_PASSWORD']}",
         f"API Key: {values['AISTUDIO_API_KEY']}",
         "",
-        "一键启动: 在项目根目录执行 bash start.sh all；AI Studio 另执行 bash start.sh aistudio。",
+        "一键启动: 在项目根目录执行 bash start.sh all；也可单独执行 bash start.sh aistudio。",
         "Windows 入口: install.cmd、start.cmd、status.cmd、check.cmd、open-aistudio.cmd；全部网关监听 0.0.0.0。",
     ]
     private_write(ROOT / "runtime/LOCAL_ACCESS.txt", "\n".join(lines) + "\n")
@@ -183,7 +188,11 @@ def docker_command():
 
 def compose(docker, args, values, *command, capture=False):
     env = dict(os.environ, **values)
-    files = ["-f", str(ROOT / "compose.yml")]
+    files = ["-f", str(ROOT / "compose.yml"), "-f", str(ROOT / "compose.aistudio-novnc.yml")]
+    overlay = ROOT / "compose.aistudio2api.yml"
+    if (command[:1] == ("up",) and "aistudio2api" in command[1:]
+            and overlay.is_file() and (ROOT / "services/aistudio2api/models.json").is_file()):
+        files += ["-f", str(overlay)]
     if values.get("WORKBUDDY_ENV_PROXY_PATCH") == "true":
         files += ["-f", str(ROOT / "compose.workbuddy-proxy.yml")]
     return run([*docker, "compose", "--project-directory", str(ROOT), "--env-file", str(args.env_file),
@@ -269,6 +278,58 @@ def service_url(name, values):
     return "http://127.0.0.1:" + values[name.upper() + "_PORT"]
 
 
+def aistudio_account_status(data):
+    """Return secret-free readiness details from an authenticated /api/status response."""
+    if not isinstance(data, dict):
+        raise ValueError("AI Studio status response must be an object")
+    status = data.get("status", data)
+    if not isinstance(status, dict):
+        raise ValueError("AI Studio status response requires a status object")
+    current = status.get("currentAuthIndex", -1)
+    accounts = status.get("accountDetails")
+    if type(current) is not int or current < 0:
+        raise ValueError("AI Studio has no current account; complete Google login in its Web/VNC UI")
+    if not isinstance(accounts, list):
+        raise ValueError("AI Studio status response requires an accountDetails array")
+    selected = None
+    for account in accounts:
+        if (not isinstance(account, dict) or type(account.get("index")) is not int or account["index"] < 0 or
+                any(not isinstance(account.get(field, False), bool) for field in ("isExpired", "isInvalid"))):
+            raise ValueError("AI Studio status response has invalid accountDetails fields")
+        if account["index"] == current:
+            selected = account
+    if selected is None:
+        raise ValueError(f"AI Studio currentAuthIndex {current} is not an available account")
+    if selected.get("isExpired", False):
+        raise ValueError(f"AI Studio current account {current} is expired; refresh Google login and reimport it")
+    if selected.get("isInvalid", False):
+        raise ValueError(f"AI Studio current account {current} is invalid; check the auth mount")
+    return {"currentAuthIndex": current, "accountCount": len(accounts)}
+
+
+def aistudio_console_status(values, timeout=20):
+    """Log in with AISTUDIO_WEB_PASSWORD and inspect /api/status without exposing the password."""
+    password = values.get("AISTUDIO_WEB_PASSWORD")
+    if not password:
+        raise ValueError("AI Studio console password is missing; run install.sh to create AISTUDIO_WEB_PASSWORD")
+    base = service_url("aistudio", values).rstrip("/")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    body = urllib.parse.urlencode({"password": password}).encode()
+    with opener.open(base + "/login", body, timeout=timeout) as response:
+        response.read()
+        if urllib.parse.urlsplit(response.geturl()).path.rstrip("/").endswith("/login"):
+            raise ValueError("AI Studio console login failed; check AISTUDIO_WEB_PASSWORD")
+    with opener.open(base + "/api/status", timeout=timeout) as response:
+        if urllib.parse.urlsplit(response.geturl()).path.rstrip("/").endswith("/login"):
+            raise ValueError("AI Studio console session expired before the status check")
+        try:
+            data = json.load(response)
+        except (UnicodeError, json.JSONDecodeError):
+            raise ValueError("AI Studio status response must be valid JSON") from None
+    return aistudio_account_status(data)
+
+
 def wait_service(name, values, seconds=180):
     base = service_url(name, values)
     path = "/healthz" if name == "workbuddy" else "/health"
@@ -340,6 +401,8 @@ def verify_generation(base, key, model, stream=False):
 def check(name, values, model=None, stream=False):
     wait_service(name, values, seconds=10)
     if name == "sub2api":
+        if model:
+            raise ValueError("Use connect.sh --provider aistudio --test --model to verify Sub2API routed generation")
         print("sub2api health: PASS (use scripts/connect-sub2api.py --test to test routed generation)")
         return
     key = values[name.upper() + "_API_KEY"]
@@ -352,10 +415,15 @@ def check(name, values, model=None, stream=False):
     else:
         raise ValueError(f"{name} did not reject an unauthenticated model-list request")
     models = request(base + "/v1/models", key).get("data", [])
+    if not models:
+        raise ValueError(f"{name} returned an empty model list; authorize an account first")
+    if model and model not in {item["id"] for item in models}:
+        raise ValueError(f"{name} does not advertise the requested model {model}")
     print(f"{name}: auth PASS; {len(models)} model(s).", flush=True)
-    if name == "aistudio":
-        health = request(base + "/health")
-        print(f"AI Studio browserConnected={health.get('browserConnected')}; complete Google login in its Web/VNC UI.", flush=True)
+    if name == "aistudio" and model:
+        summary = aistudio_console_status(values)
+        print(f"AI Studio console: current account #{summary['currentAuthIndex']} is unexpired "
+              f"({summary['accountCount']} account(s)).", flush=True)
     if model:
         verify_generation(base, key, model, stream)
         print(f"{name}: real {'streaming' if stream else 'non-streaming'} generation PASS (PROXY_KIT_OK)", flush=True)
@@ -364,7 +432,7 @@ def check(name, values, model=None, stream=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("install", "start", "stop", "status", "check", "access"))
-    parser.add_argument("service", nargs="?", default="all", choices=(*SERVICES, "aistudio", "all"))
+    parser.add_argument("service", nargs="?", default="all", choices=(*SERVICES, *ON_DEMAND_SERVICES, "all"))
     parser.add_argument("--env-file", type=pathlib.Path, default=ROOT / "runtime/stack.env")
     parser.add_argument("--prepare-only", action="store_true", help="Generate configuration without Docker or network changes")
     parser.add_argument("--install-docker", action="store_true", help="Handled by the Linux install.sh bootstrap")
@@ -376,7 +444,7 @@ def main():
     parser.add_argument("--upstream-proxy", help="Optional outbound proxy reachable from the containers")
     parser.add_argument("--model", help="check: additionally make a real generation request")
     parser.add_argument("--stream", action="store_true", help="check: verify content and [DONE] in a real SSE response")
-    for name in (*SERVICES, "aistudio"):
+    for name in SERVICES:
         parser.add_argument("--" + name + "-port", type=int)
     args = parser.parse_args()
     args.env_file = args.env_file.expanduser().resolve()

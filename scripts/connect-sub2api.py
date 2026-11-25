@@ -19,6 +19,10 @@ def items(data):
     return data if isinstance(data, list) else data.get("items", data.get("accounts", []))
 
 
+def is_redacted(value):
+    return isinstance(value, str) and ("***" in value or value.lower() in ("[redacted]", "<redacted>"))
+
+
 class Sub2API:
     def __init__(self, base, values, cli=None):
         self.base = base.rstrip("/")
@@ -46,12 +50,7 @@ class Sub2API:
             with proxykit.HTTP.open(req, timeout=120) as response:
                 data = json.load(response)
         except urllib.error.HTTPError as error:
-            try:
-                data = json.load(error)
-                reason = data.get("reason", data.get("message", "Request rejected"))
-            except ValueError:
-                reason = "Request rejected"
-            raise ValueError(f"Sub2API {method} {path}: HTTP {error.code} ({reason})") from None
+            raise ValueError(f"Sub2API {method} {path}: HTTP {error.code}") from None
         if data.get("code", 0) != 0:
             raise ValueError("Sub2API API rejected the operation")
         return data.get("data", data)
@@ -83,7 +82,7 @@ def main():
     p.add_argument("--upstream-url", help="Override container-network upstream URL (single provider only)")
     p.add_argument("--test", action="store_true", help="Create/reuse a provider-scoped API key and verify routed generation")
     p.add_argument("--stream", action="store_true", help="--test: verify a real SSE response including [DONE]")
-    p.add_argument("--model", help="Model for --test (single provider); otherwise discover WorkBuddy model")
+    p.add_argument("--model", help="Model for --test; otherwise use the provider's preferred available model")
     p.add_argument("--acknowledge-compliance", action="store_true", help="Explicitly submit Sub2API's published first-login acknowledgement; read its document first")
     args = p.parse_args()
     values = proxykit.read_env(args.env_file)
@@ -92,7 +91,7 @@ def main():
     for key in ("SUB2API_EMAIL", "SUB2API_PASSWORD"):
         if os.environ.get(key):
             values[key] = os.environ[key]
-    base = args.base_url or os.environ.get("SUB2API_BASE_URL") or values.get("SUB2API_BASE_URL") or proxykit.service_url("sub2api", values)
+    base = (args.base_url or os.environ.get("SUB2API_BASE_URL") or values.get("SUB2API_BASE_URL") or proxykit.service_url("sub2api", values)).rstrip("/")
     api = Sub2API(base, values, args.admin_cli)
     compliance = api.admin("GET", "compliance")
     if compliance.get("required"):
@@ -125,7 +124,7 @@ def main():
                                                 "subscription_type": "standard", "is_exclusive": False})
             groups.append(group)
         ports = {"antigravity": 8045, "workbuddy": 7863, "aistudio": 7860}
-        url = args.upstream_url or f"http://{name}:{ports[name]}"
+        url = (args.upstream_url or f"http://{name}:{ports[name]}").rstrip("/")
         credential = {"base_url": url, "api_key": values[name.upper() + "_API_KEY"]}
         account = next((a for a in accounts if a["name"] == label), None)
         if account:
@@ -134,8 +133,11 @@ def main():
                 raise ValueError(f"Account {label} has a different platform/type; no changes applied")
             stored = detail.get("credentials", {})
             # Sub2API redacts API keys from account reads; compare them only when exposed.
-            if (stored.get("base_url") != url or
-                    ("api_key" in stored and stored["api_key"] != credential["api_key"])):
+            stored_key = stored.get("api_key")
+            key_redacted = is_redacted(stored_key) or (
+                stored_key in (None, "") and detail.get("credentials_status", {}).get("has_api_key"))
+            if ((stored.get("base_url") or "").rstrip("/") != url or
+                    ("api_key" in stored and not key_redacted and stored_key != credential["api_key"])):
                 raise ValueError(f"Account {label} has different credentials; review it before updating")
         else:
             account = api.admin("POST", "accounts", {
@@ -149,36 +151,69 @@ def main():
         if group["id"] not in verified.get("group_ids", []):
             raise ValueError(f"Account {label} is not attached to its expected group")
         print(f"Sub2API: {label}: account={account['id']} group={group['id']} upstream={url}", flush=True)
-        receipt = {"base_url": base, "account_id": account["id"], "group_id": group["id"], "upstream_url": url}
+        identity = {"base_url": base, "account_id": account["id"], "group_id": group["id"], "upstream_url": url}
+        previous = dict(receipts.get(name, {}))
+        for field in ("base_url", "upstream_url"):
+            previous[field] = (previous.get(field) or "").rstrip("/")
+        receipt = dict(previous) if all(previous.get(field) == value for field, value in identity.items()) else {}
+        receipt.update(identity)
         receipts[name] = receipt
         proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
         if args.test:
-            keys, key_page = [], 1
-            while True:
-                batch = items(api.http("GET", f"/api/v1/keys?page={key_page}&page_size=100"))
-                keys += batch
-                if len(batch) < 100:
-                    break
-                key_page += 1
-            key_name = "ai-proxy-kit-" + name
-            key = next((k for k in keys if k["name"] == key_name and k.get("group_id") == group["id"]), None)
-            if not key:
-                key = api.http("POST", "/api/v1/keys", {"name": key_name, "group_id": group["id"]})
-            if not key.get("key"):
-                key = api.http("GET", "/api/v1/keys/" + str(key["id"]))
-            # Save the accepted identity before generation so retrying never creates another key.
-            receipt.update(api_key_id=key["id"], api_key=key["key"])
+            if receipt.get("generation") == "PASS":
+                receipt["last_success"] = {field: receipt[field] for field in ("tested_model", "generation", "stream") if field in receipt}
+            receipt["generation"] = "PENDING"
             proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
-            model = args.model or ("gemini-3.8-flash-low" if name == "antigravity" else None)
-            if not model:
-                models = proxykit.request(proxykit.service_url(name, values) + "/v1/models",
-                                          values[name.upper() + "_API_KEY"]).get("data", [])
-                ids = [m["id"] for m in models]
-                preferred = ("cn:hy4flash-free", "cn:deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v3.2", "glm-5.2")
-                model = next((m for m in preferred if m in ids), ids[0] if ids else None)
-            if not model:
-                raise ValueError(f"{name} has no available models; authorize an account first")
-            proxykit.verify_generation(base, key["key"], model, args.stream)
+            try:
+                keys, key_page = [], 1
+                while True:
+                    batch = items(api.http("GET", f"/api/v1/keys?page={key_page}&page_size=100"))
+                    keys += batch
+                    if len(batch) < 100:
+                        break
+                    key_page += 1
+                key_name = "ai-proxy-kit-" + name
+                matching_keys = [k for k in keys if k["name"] == key_name and k.get("group_id") == group["id"]]
+                key = next((k for k in matching_keys if k["id"] == receipt.get("api_key_id")),
+                           matching_keys[0] if matching_keys else None)
+                if not key:
+                    key = api.http("POST", "/api/v1/keys", {"name": key_name, "group_id": group["id"]})
+                if key.get("name") != key_name or key.get("group_id") != group["id"]:
+                    raise ValueError(f"{name} scoped API key has a different identity/group")
+                # Save the accepted identity before generation so retrying never creates another key.
+                if receipt.get("api_key_id") != key["id"]:
+                    receipt.pop("api_key", None)
+                receipt["api_key_id"] = key["id"]
+                if key.get("key") and not is_redacted(key["key"]):
+                    receipt["api_key"] = key["key"]
+                proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
+                if not key.get("key") or is_redacted(key["key"]):
+                    key = api.http("GET", "/api/v1/keys/" + str(key["id"]))
+                    if (key.get("id") != receipt["api_key_id"] or key.get("name") != key_name or
+                            key.get("group_id") != group["id"]):
+                        raise ValueError(f"{name} scoped API key has a different identity/group")
+                if key.get("key") and not is_redacted(key["key"]):
+                    receipt["api_key"] = key["key"]
+                if not receipt.get("api_key") or is_redacted(receipt["api_key"]):
+                    raise ValueError(f"{name} scoped API key is redacted; retain its original private receipt")
+                proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
+                model = args.model or ("gemini-3.8-flash-low" if name == "antigravity" else None)
+                if not model:
+                    models = proxykit.request(proxykit.service_url(name, values) + "/v1/models",
+                                              values[name.upper() + "_API_KEY"]).get("data", [])
+                    ids = [m["id"] for m in models]
+                    preferred = ("gemini-4-hydrogen",) if name == "aistudio" else (
+                        "cn:hy4flash-free", "cn:deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v3.2", "glm-5.2")
+                    model = next((m for m in preferred if m in ids), ids[0] if ids else None)
+                if not model:
+                    raise ValueError(f"{name} has no available models; authorize an account first")
+                receipt.update(tested_model=model, stream=args.stream)
+                proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
+                proxykit.verify_generation(base, receipt["api_key"], model, args.stream)
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                receipt["generation"] = "FAIL"
+                proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
+                raise
             receipt.update(tested_model=model, generation="PASS", stream=args.stream)
             proxykit.private_write(receipts_path, json.dumps(receipts, indent=2))
             print(f"sub2api -> {name} -> {model}: real generation PASS (PROXY_KIT_OK)", flush=True)

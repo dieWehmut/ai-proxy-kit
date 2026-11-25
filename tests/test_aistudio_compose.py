@@ -14,6 +14,8 @@ SYNTHETIC_ENV = {
     "AISTUDIO_PORT": "7860",
     "AISTUDIO_API_KEY": "synthetic-api-key",
     "AISTUDIO_WEB_PASSWORD": "synthetic-console-password",
+    "AISTUDIO2API_PORT": "2048",
+    "AISTUDIO2API_API_KEY": "synthetic-playground-api-key",
     "ANTIGRAVITY_API_KEY": "synthetic-antigravity-api-key",
     "ANTIGRAVITY_WEB_PASSWORD": "synthetic-antigravity-web-password",
     "WORKBUDDY_API_KEY": "synthetic-workbuddy-api-key",

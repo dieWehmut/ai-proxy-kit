@@ -130,6 +130,31 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  aistudio2api:
+    profiles: [aistudio2api]
+    image: ${AISTUDIO2API_IMAGE:-ghcr.io/mag1cfall/aistudio2api:latest}
+    ports: ["0.0.0.0:${AISTUDIO2API_PORT:-2048}:2048"]
+    environment:
+      LISTEN_ADDR: 0.0.0.0:2048
+      PREVIEW_LISTEN_ADDR: 0.0.0.0:2051
+      AISTUDIO_AUTH_STATES: /data/auth
+      PROXY_API_KEY: ${AISTUDIO2API_API_KEY:?Run install.sh first}
+      ADMIN_AUTH_ENABLED: ${AISTUDIO2API_ADMIN_AUTH:-false}
+      ADMIN_USERNAME: ${AISTUDIO2API_ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${AISTUDIO2API_ADMIN_PASSWORD:-}
+      UPSTREAM_CHANNELS: ${AISTUDIO2API_CHANNELS:-playground}
+      WAA_BACKEND: ${AISTUDIO2API_WAA_BACKEND:-spidermonkey}
+      AUTO_START: "true"
+      TZ: ${TZ:-Asia/Shanghai}
+      HTTP_PROXY: ${UPSTREAM_PROXY:-}
+      HTTPS_PROXY: ${UPSTREAM_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,::1,antigravity,workbuddy,sub2api
+    volumes:
+      - ./runtime/aistudio2api/data:/data
+    shm_size: 1gb
+    restart: unless-stopped
+    logging: *logging
+
 volumes:
   sub2api-data:
   postgres-data:
