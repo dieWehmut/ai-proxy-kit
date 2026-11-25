@@ -1,7 +1,7 @@
 # AI Proxy Kit
 
-统一管理 **Antigravity Manager (agy)、WorkBuddy2API、AIStudio2API 和 Sub2API**
-四个服务。AI Studio 使用 AIStudio2API 的 Playground 通道；Build 通道已停用。
+统一管理 **Antigravity Manager (agy)、WorkBuddy2API、AIStudio2API、Qoder2API-Hub 和 Sub2API**
+五个服务。AI Studio 使用 AIStudio2API 的 Playground 通道；Build 通道已停用。
 所有对外网关明确监听并发布 **`0.0.0.0`**。
 
 支持 Linux AMD64 / ARM64、WSL2，以及 Windows 双击调用 WSL。
@@ -12,6 +12,7 @@
 | antigravity (Antigravity / agy) | 8045 | `http://localhost:8045` | `lbjlaq/antigravity-manager:v5.0.3` |
 | workbuddy (WorkBuddy2API) | 7863 | `http://localhost:7863/panel/` | `ghcr.io/linguo2625469/workbuddy2api-panel:1.13.0` |
 | aistudio (Playground) | 2048 | `http://localhost:2048` | `ghcr.io/mag1cfall/aistudio2api:latest` |
+| qoder (Qoder2API-Hub) | 8790 | `http://localhost:8790` | `ghcr.io/shuishuipingan/qoder2api-hub:latest` |
 | sub2api | 8080 | `http://localhost:8080` | `weishaw/sub2api:0.2.23` |
 
 `0.0.0.0` 是监听地址。客户端使用 `localhost` 或主机 IP。
@@ -25,7 +26,7 @@ cd ai-proxy-kit
 bash install.sh all
 ```
 
-`all` 包含上述四项服务。首次运行生成独立随机密钥，保存在仅当前用户可读的
+`all` 包含上述五项服务。首次运行生成独立随机密钥，保存在仅当前用户可读的
 `runtime/stack.env`。账号、程序配置和命名卷均持久化；重跑不重置密钥。
 Python 3 / curl 缺失时，Linux 启动器通过 apt/dnf 安装。
 需要安装 Docker Engine 时，显式使用官方 Linux 安装脚本：
@@ -95,6 +96,10 @@ AI Studio 安装与验收见 [Windows 本机安装 AI Studio Playground](docs/WI
   容器内的 `PROXY_API_KEY`。`AISTUDIO_CHANNELS=playground` 固定使用 Playground 通道，
   数据保存在 `runtime/aistudio/data`。容器内没有 `/health`；`/api/status` 的 `RUNNING`
   和可用账号计数才是账号就绪的判据。
+- Qoder（Qoder2API-Hub）：服务名 `qoder`，默认端口 `8790`，面板 `http://localhost:8790/`。
+  面板密码为 `QODER_PANEL_PASSWORD`（容器首启时哈希写入 `runtime/qoder/accounts/settings.json`），
+  客户端 API Key 为 `QODER_API_KEY`（Compose 映射为容器内 `API_KEY`，不再由容器随机生成并打印到日志）。
+  在面板「账号」页用 OAuth / PAT 添加 Qoder 账号；`/health` 的 `accounts_ready` ≥ 1 才能真实生成。
 
 AI Studio 需要有效的 Google 会话。浏览器已经登录 Google 时，可导出 Playwright
 storage-state JSON，再通过 Windows 入口导入；本仓库的 Compose 服务把
@@ -141,12 +146,15 @@ bash connect.sh --provider antigravity --test --model gemini-3.8-flash-low
 # AI Studio 安装后可先接入；完成 Google 登录后再执行 --test。
 bash connect.sh --provider aistudio
 bash connect.sh --provider aistudio --test
+# Qoder 添加账号后接入并验证。
+bash connect.sh --provider qoder
+bash connect.sh --provider qoder --test
 # 明确同意上游文档后，可非交互提交确认。
 bash connect.sh --acknowledge-compliance
 ```
 
 默认为 Antigravity、WorkBuddy 分别创建 **OpenAI / API Key** 账号和独立分组；
-AI Studio 用 `--provider aistudio` 单独接入。固定 Chat Completions
+AI Studio 和 Qoder 分别用 `--provider aistudio` / `--provider qoder` 单独接入。固定 Chat Completions
 协议，Compose 内通过服务名连接。重复运行复用原账号、分组和调用 Key。
 读回 ID 和调用 Key 保存在 `runtime/sub2api-connections.json`，不输出凭据。
 
@@ -172,7 +180,8 @@ WSL2 NAT 下，从局域网经 Windows IP 访问仍取决于 Windows 转发和�
 AI Studio 的模型 ID 以本次 `/v1/models` 返回为准，不要沿用历史文档或旧容器中的名称。
 `check.sh aistudio` 验证匿名请求被拒绝、带 key 请求成功和模型列表非空；
 `check.sh aistudio --model <当前模型 ID>` 还会登录管理端检查 Playground 账号状态并做一次
-真实生成。
+真实生成。`check.sh qoder` 验证 `/ping`、匿名拒绝和带 key 模型列表；`--model` 时先要求
+`/health` 的 `accounts_ready ≥ 1`，再做真实生成。
 
 GitHub Actions 检查 Linux 配置、凭据保留、网关绑定地址，以及 Windows PowerShell 5.1 / 7。
 真实结果见 [WSL 验收记录](docs/VALIDATION.md)；AI Studio 的当前迁移证据和端口对应关系见
