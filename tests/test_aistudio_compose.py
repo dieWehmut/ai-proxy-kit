@@ -1,4 +1,4 @@
-"""Compose contract checks for the four public AI Proxy Kit services.
+"""Compose contract checks for the five public AI Proxy Kit services.
 
 The contract covers the services that publish host ports.  PostgreSQL and
 Redis remain private dependencies of sub2api and do not expose ports.
@@ -14,12 +14,15 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-PUBLIC_SERVICES = {"antigravity", "workbuddy", "sub2api", "aistudio"}
+PUBLIC_SERVICES = {"antigravity", "workbuddy", "sub2api", "aistudio", "qoder"}
 
 SYNTHETIC_ENV = {
     "AISTUDIO_API_KEY": "synthetic-aistudio-api-key",
     "AISTUDIO_ADMIN_PASSWORD": "synthetic-aistudio-admin-password",
     "AISTUDIO_PORT": "2048",
+    "QODER_API_KEY": "synthetic-qoder-api-key",
+    "QODER_PANEL_PASSWORD": "synthetic-qoder-panel-password",
+    "QODER_PORT": "8790",
     "ANTIGRAVITY_API_KEY": "synthetic-antigravity-api-key",
     "ANTIGRAVITY_WEB_PASSWORD": "synthetic-antigravity-web-password",
     "WORKBUDDY_API_KEY": "synthetic-workbuddy-api-key",
@@ -33,6 +36,8 @@ SYNTHETIC_ENV = {
 # Host overrides must not leak into the resolved configuration.
 SCRUBBED_KEYS = set(SYNTHETIC_ENV) | {
     "AISTUDIO_IMAGE",
+    "QODER_IMAGE",
+    "QODER_HOSTNAME",
     "AISTUDIO_ADMIN_AUTH",
     "AISTUDIO_ADMIN_USER",
     "AISTUDIO_CHANNELS",
@@ -107,6 +112,8 @@ class AistudioComposeTests(unittest.TestCase):
                 "sub2api",
                 "--profile",
                 "aistudio",
+                "--profile",
+                "qoder",
                 "-f",
                 "compose.yml",
                 "config",
@@ -141,7 +148,7 @@ class AistudioComposeTests(unittest.TestCase):
         self.assertIn(name, self.services, f"missing {name} service")
         return self.services[name]
 
-    def test_public_service_set_is_exactly_the_four_services(self):
+    def test_public_service_set_is_exactly_the_five_services(self):
         self.assertEqual(self.published_service_names(self.services), PUBLIC_SERVICES)
         for name in PUBLIC_SERVICES:
             self.assertIn(name, self.services)
@@ -206,6 +213,7 @@ class AistudioComposeTests(unittest.TestCase):
             "antigravity": "8045",
             "workbuddy": "7863",
             "sub2api": "8080",
+            "qoder": "8790",
         }
         for name, port_number in expected.items():
             with self.subTest(service=name):
@@ -215,6 +223,42 @@ class AistudioComposeTests(unittest.TestCase):
                 self.assertEqual(port.get("host_ip"), "0.0.0.0")
                 self.assertEqual(str(port.get("published")), port_number)
                 self.assertEqual(str(port.get("target")), port_number)
+
+    def test_qoder_pins_the_api_key_and_passes_the_panel_password_as_a_flag(self):
+        qoder = self.service("qoder")
+        self.assertEqual(qoder.get("image"), "ghcr.io/shuishuipingan/qoder2api-hub:latest")
+
+        environment = qoder.get("environment") or {}
+        self.assertEqual(environment.get("API_KEY"), SYNTHETIC_ENV["QODER_API_KEY"])
+        self.assertEqual(environment.get("QODER_PANEL_PASSWORD"), SYNTHETIC_ENV["QODER_PANEL_PASSWORD"])
+        self.assertEqual(environment.get("HOST"), "0.0.0.0")
+        self.assertEqual(str(environment.get("PORT")), "8790")
+
+        # --lan forces an API key; the panel password must reach the CLI as a flag
+        # so the app hashes it into settings.json. The source must use `$$`: a
+        # single `$` is interpolated on the host and arrives EMPTY (verified with
+        # a real compose run). The rendered config must therefore still reference
+        # the variable (never the clear-text password).
+        command = qoder.get("command") or []
+        self.assertIn("sh", command)
+        script = command[-1]
+        self.assertIn("--lan", script)
+        self.assertIn("$$QODER_PANEL_PASSWORD", script, "a single $ would be interpolated on the host and arrive empty")
+        # The clear-text password is only ever an environment value (like API_KEY);
+        # the command line itself must carry the variable reference, not the value.
+        self.assertNotIn(SYNTHETIC_ENV["QODER_PANEL_PASSWORD"], script)
+
+        volumes = qoder.get("volumes") or []
+        targets = {v.get("target") for v in volumes if isinstance(v, dict)}
+        self.assertEqual(targets, {"/app/accounts", "/app/logs", "/app/usage"})
+        accounts = next(v for v in volumes if isinstance(v, dict) and v.get("target") == "/app/accounts")
+        self.assertEqual(accounts.get("type"), "bind")
+        self.assertEqual(
+            pathlib.Path(accounts.get("source", "")).resolve(),
+            (ROOT / "runtime" / "qoder" / "accounts").resolve(),
+        )
+        healthcheck = (qoder.get("healthcheck") or {}).get("test") or []
+        self.assertTrue(any("/ping" in part for part in healthcheck), "qoder healthcheck must probe /ping")
 
 
 if __name__ == "__main__":
