@@ -1,0 +1,14 @@
+{
+  "source": "/home/dev/project/sub2api-key-group",
+  "upstream": "5c2982a81b46e2142d0143d2f83c1ce9c4da1d24",
+  "head": "f109364e78e662f8f84defeb284d8bde93218623",
+  "code_commit": "b0ff02df61186648ec667f01ca870293472e28b2",
+  "full_patch_sha256": "e6f1ea60f1fc240622bc7ea4346accb0bbb71408d7a8be80320bd6ac7c211c64",
+  "validation_command": "go test -tags 'unit embed' ./internal/service ./internal/server/routes ./internal/server/middleware -run 'TestKeyGroupModels|TestAPIKeyGroupDiscovery|TestGatewayRoutesKeyGroupInfo|TestGatewayRoutesKeyBillingInfo|TestAPIKeyAuth' -count=1",
+  "validation_exit_code": 0,
+  "validation_output": "service OK; routes OK; middleware OK",
+  "patch_file": "sub2api-v0.2.24-key-group.patch",
+  "deployed_binary_sha256": "18597efb36e9c52f02d33d5b5bec41a98694fe3c7323d32e5f6297bba658f404",
+  "deployed_image": "local/sub2api-key-group:0.2.24-b0ff02df6",
+  "lxc": 158
+}

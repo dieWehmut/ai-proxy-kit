@@ -1,0 +1,785 @@
+diff --git a/backend/internal/handler/gateway_key_group.go b/backend/internal/handler/gateway_key_group.go
+new file mode 100644
+index 000000000..c814bc35b
+--- /dev/null
++++ b/backend/internal/handler/gateway_key_group.go
+@@ -0,0 +1,62 @@
++package handler
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++
++	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++)
++
++type keyGroupInfoResponse struct {
++	Object        string `json:"object"`
++	SchemaVersion int    `json:"schema_version"`
++	Key           struct {
++		ID      int64 `json:"id"`
++		GroupID int64 `json:"group_id"`
++	} `json:"key"`
++	Group struct {
++		ID       int64  `json:"id"`
++		Name     string `json:"name"`
++		Platform string `json:"platform"`
++		Status   string `json:"status"`
++	} `json:"group"`
++	Models   []service.KeyGroupModel `json:"models"`
++	Revision string                  `json:"revision"`
++}
++
++// KeyGroupInfo returns only the authenticated key's current group and requestable
++// model aliases. Authentication for this endpoint reads live key/group state.
++// GET /v1/sub2api/key-group
++func (h *GatewayHandler) KeyGroupInfo(c *gin.Context) {
++	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
++	if !ok || apiKey == nil {
++		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
++		return
++	}
++	if apiKey.GroupID == nil || apiKey.Group == nil || apiKey.Group.ID != *apiKey.GroupID {
++		h.errorResponse(c, http.StatusForbidden, "permission_error", "API key is not assigned to a group")
++		return
++	}
++	models, err := h.gatewayService.GetKeyGroupModels(c.Request.Context(), apiKey.Group)
++	if err != nil {
++		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Key group model configuration is unavailable")
++		return
++	}
++	response := keyGroupInfoResponse{Object: "sub2api.key_group", SchemaVersion: 1, Models: models}
++	response.Key.ID = apiKey.ID
++	response.Key.GroupID = *apiKey.GroupID
++	response.Group.ID = apiKey.Group.ID
++	response.Group.Name = apiKey.Group.Name
++	response.Group.Platform = apiKey.Group.Platform
++	response.Group.Status = apiKey.Group.Status
++	// Hash only safe response fields, not credentials or account records.
++	encoded, _ := json.Marshal(response)
++	revision := sha256.Sum256(encoded)
++	response.Revision = hex.EncodeToString(revision[:])
++	c.Header("Cache-Control", "no-store")
++	c.JSON(http.StatusOK, response)
++}
+diff --git a/backend/internal/server/middleware/api_key_auth.go b/backend/internal/server/middleware/api_key_auth.go
+index c2dd7bf8f..a45128f28 100644
+--- a/backend/internal/server/middleware/api_key_auth.go
++++ b/backend/internal/server/middleware/api_key_auth.go
+@@ -102,7 +102,14 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
+ 
+ 		// ── 2. 验证 Key 存在 ─────────────────────────────────────────
+ 
+-		apiKey, err := apiKeyService.GetByKey(c.Request.Context(), apiKeyString)
++		keyGroupInfoRequest := c.Request.Method == http.MethodGet && c.Request.URL.Path == "/v1/sub2api/key-group"
++		var apiKey *service.APIKey
++		var err error
++		if keyGroupInfoRequest {
++			apiKey, err = apiKeyService.GetByKeyUncached(c.Request.Context(), apiKeyString)
++		} else {
++			apiKey, err = apiKeyService.GetByKey(c.Request.Context(), apiKeyString)
++		}
+ 		if err != nil {
+ 			if errors.Is(err, service.ErrAPIKeyNotFound) {
+ 				recordInvalidAuthFailure(c, apiKeyService)
+@@ -171,13 +178,19 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
+ 		if abortIfAPIKeyGroupNotAllowed(c, apiKey) {
+ 			return
+ 		}
++		// Discovery is not billable, but an expired key must not read current
++		// group configuration. Other read endpoints retain their existing rules.
++		if keyGroupInfoRequest && (apiKey.Status == service.StatusAPIKeyExpired || apiKey.IsExpired()) {
++			AbortWithError(c, http.StatusForbidden, "API_KEY_EXPIRED", "API key 已过期")
++			return
++		}
+ 		ctx := context.WithValue(c.Request.Context(), ctxkey.UserID, apiKey.User.ID)
+ 		c.Request = c.Request.WithContext(ctx)
+ 		billingInfoRequest := c.Request.URL.Path == "/v1/sub2api/billing"
+ 		// Async image task polling only reads data that already belongs to the
+ 		// authenticated key and must remain available after the completed
+ 		// generation consumes the key's remaining balance.
+-		skipBilling := c.Request.URL.Path == "/v1/usage" || billingInfoRequest || isAsyncImageTaskRead(c.Request.Method, c.Request.URL.Path)
++		skipBilling := c.Request.URL.Path == "/v1/usage" || billingInfoRequest || keyGroupInfoRequest || isAsyncImageTaskRead(c.Request.Method, c.Request.URL.Path)
+ 
+ 		// ── 4. SimpleMode → early return ─────────────────────────────
+ 
+@@ -189,7 +202,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
+ 			})
+ 			c.Set(string(ContextKeyUserRole), apiKey.User.Role)
+ 			setGroupContext(c, apiKey.Group)
+-			if !billingInfoRequest {
++			if !billingInfoRequest && !keyGroupInfoRequest {
+ 				_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
+ 			}
+ 			c.Next()
+@@ -202,7 +215,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
+ 		isSubscriptionType := apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
+ 
+ 		// 倍率自省不需要订阅数据；/v1/usage 仍保留原有订阅读取行为。
+-		if isSubscriptionType && subscriptionService != nil && !billingInfoRequest {
++		if isSubscriptionType && subscriptionService != nil && !billingInfoRequest && !keyGroupInfoRequest {
+ 			sub, subErr := subscriptionService.GetActiveSubscription(
+ 				c.Request.Context(),
+ 				apiKey.User.ID,
+@@ -287,7 +300,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
+ 		})
+ 		c.Set(string(ContextKeyUserRole), apiKey.User.Role)
+ 		setGroupContext(c, apiKey.Group)
+-		if !billingInfoRequest {
++		if !billingInfoRequest && !keyGroupInfoRequest {
+ 			_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
+ 		}
+ 
+diff --git a/backend/internal/server/routes/gateway.go b/backend/internal/server/routes/gateway.go
+index 375d36320..7d299779f 100644
+--- a/backend/internal/server/routes/gateway.go
++++ b/backend/internal/server/routes/gateway.go
+@@ -203,6 +203,7 @@ func RegisterGatewayRoutes(
+ 	gateway.Use(endpointNorm)
+ 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
+ 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
++	gateway.GET("/sub2api/key-group", h.Gateway.KeyGroupInfo)
+ 	gateway.Use(groupModelAllowlist)
+ 	gateway.Use(rejectConflictingFields)
+ 	gateway.Use(compositeTarget)
+diff --git a/backend/internal/server/routes/gateway_key_group_test.go b/backend/internal/server/routes/gateway_key_group_test.go
+new file mode 100644
+index 000000000..68ea03c6a
+--- /dev/null
++++ b/backend/internal/server/routes/gateway_key_group_test.go
+@@ -0,0 +1,203 @@
++package routes
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/Wei-Shaw/sub2api/internal/config"
++	"github.com/Wei-Shaw/sub2api/internal/handler"
++	servermiddleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/Wei-Shaw/sub2api/internal/web"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++type keyGroupRouteAPIKeyRepo struct {
++	service.APIKeyRepository
++	current *service.APIKey
++	cached  *service.APIKey
++	reads   int
++}
++
++func cloneKeyGroupRouteKey(source *service.APIKey) *service.APIKey {
++	clone := *source
++	if source.User != nil {
++		user := *source.User
++		clone.User = &user
++	}
++	if source.Group != nil {
++		group := *source.Group
++		clone.Group = &group
++	}
++	return &clone
++}
++
++func (r *keyGroupRouteAPIKeyRepo) GetByKey(_ context.Context, key string) (*service.APIKey, error) {
++	r.reads++
++	if r.current == nil || key != r.current.Key {
++		return nil, service.ErrAPIKeyNotFound
++	}
++	return cloneKeyGroupRouteKey(r.current), nil
++}
++
++func (r *keyGroupRouteAPIKeyRepo) GetByKeyForAuth(_ context.Context, key string) (*service.APIKey, error) {
++	if key != r.cached.Key {
++		return nil, service.ErrAPIKeyNotFound
++	}
++	return cloneKeyGroupRouteKey(r.cached), nil
++}
++
++type keyGroupRouteAccountRepo struct {
++	service.AccountRepository
++	groups  map[int64][]service.Account
++	lookups []int64
++}
++
++func (r *keyGroupRouteAccountRepo) ListSchedulableByGroupID(_ context.Context, groupID int64) ([]service.Account, error) {
++	r.lookups = append(r.lookups, groupID)
++	return r.groups[groupID], nil
++}
++
++func newKeyGroupRouteTestRouter() (*gin.Engine, *keyGroupRouteAPIKeyRepo, *keyGroupRouteAccountRepo) {
++	gin.SetMode(gin.TestMode)
++	groupID := int64(8)
++	group := &service.Group{ID: groupID, Name: "key-group", Status: service.StatusActive, Hydrated: true, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard}
++	key := &service.APIKey{ID: 100, UserID: 7, Key: "key-group-test-secret", Status: service.StatusActive, GroupID: &groupID, Group: group, User: &service.User{ID: 7, Role: service.RoleUser, Status: service.StatusActive, Balance: 0}}
++	keys := &keyGroupRouteAPIKeyRepo{current: key, cached: cloneKeyGroupRouteKey(key)}
++	accounts := &keyGroupRouteAccountRepo{groups: map[int64][]service.Account{8: {{ID: 5, Platform: service.PlatformOpenAI, Type: "apikey", Status: service.StatusActive, Credentials: map[string]any{"api_key": "upstream-test-secret", "model_mapping": map[string]any{"public-a": "actual-a"}}}}}}
++	cfg := &config.Config{RunMode: config.RunModeStandard}
++	keyService := service.NewAPIKeyService(keys, nil, nil, nil, nil, nil, cfg)
++	gatewayService := service.NewGatewayService(accounts, nil, nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
++	gatewayHandler := handler.NewGatewayHandler(gatewayService, nil, nil, nil, nil, nil, nil, nil, keyService, nil, nil, nil, nil, cfg, nil)
++	router := gin.New()
++	if web.HasEmbeddedFrontend() {
++		router.Use(web.ServeEmbeddedFrontend())
++	}
++	RegisterGatewayRoutes(router, &handler.Handlers{Gateway: gatewayHandler, OpenAIGateway: &handler.OpenAIGatewayHandler{}}, servermiddleware.NewAPIKeyAuthMiddleware(keyService, nil, cfg), keyService, nil, nil, nil, nil, cfg)
++	return router, keys, accounts
++}
++
++func requestKeyGroupInfo(router *gin.Engine, key string) *httptest.ResponseRecorder {
++	req := httptest.NewRequest(http.MethodGet, "/v1/sub2api/key-group", nil)
++	req.RemoteAddr = "192.0.2.1:43210"
++	if key != "" {
++		req.Header.Set("Authorization", "Bearer "+key)
++	}
++	w := httptest.NewRecorder()
++	router.ServeHTTP(w, req)
++	return w
++}
++
++func decodeKeyGroupInfo(t *testing.T, w *httptest.ResponseRecorder) struct {
++	Group struct {
++		ID   int64
++		Name string
++	}
++	Models   []service.KeyGroupModel
++	Revision string
++} {
++	t.Helper()
++	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
++	var body struct {
++		Group struct {
++			ID   int64
++			Name string
++		}
++		Models   []service.KeyGroupModel
++		Revision string
++	}
++	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
++	require.Len(t, body.Models, 1)
++	return body
++}
++
++func TestGatewayRoutesKeyGroupInfoRequiresAPIKeyAndHasNoCredentialLeak(t *testing.T) {
++	router, keys, accounts := newKeyGroupRouteTestRouter()
++	w := requestKeyGroupInfo(router, "")
++	require.Equal(t, http.StatusUnauthorized, w.Code)
++	require.Empty(t, accounts.lookups)
++
++	w = requestKeyGroupInfo(router, keys.current.Key)
++	body := decodeKeyGroupInfo(t, w)
++	require.Equal(t, int64(8), body.Group.ID)
++	require.Equal(t, "actual-a", body.Models[0].UpstreamModel)
++	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
++	require.NotContains(t, w.Body.String(), keys.current.Key)
++	require.NotContains(t, w.Body.String(), "upstream-test-secret")
++	require.NotContains(t, w.Body.String(), "credentials")
++	require.NotContains(t, w.Body.String(), "account_id")
++}
++
++func TestGatewayRoutesKeyGroupInfoReadsGroupChangesImmediately(t *testing.T) {
++	router, keys, accounts := newKeyGroupRouteTestRouter()
++	before := decodeKeyGroupInfo(t, requestKeyGroupInfo(router, keys.current.Key))
++	groupID := int64(9)
++	keys.current.GroupID = &groupID
++	keys.current.Group = &service.Group{ID: groupID, Name: "new-group", Status: service.StatusActive, Hydrated: true, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard}
++	accounts.groups[9] = []service.Account{{ID: 6, Platform: service.PlatformOpenAI, Type: "apikey", Status: service.StatusActive, Credentials: map[string]any{"model_mapping": map[string]any{"public-b": "actual-b"}}}}
++
++	after := decodeKeyGroupInfo(t, requestKeyGroupInfo(router, keys.current.Key))
++
++	require.Equal(t, int64(9), after.Group.ID)
++	require.Equal(t, "actual-b", after.Models[0].UpstreamModel)
++	require.NotEqual(t, before.Revision, after.Revision)
++	require.Equal(t, []int64{8, 9}, accounts.lookups)
++	require.Equal(t, 2, keys.reads)
++}
++
++func TestGatewayRoutesKeyGroupInfoReadsAccountMappingsImmediately(t *testing.T) {
++	router, keys, accounts := newKeyGroupRouteTestRouter()
++	before := decodeKeyGroupInfo(t, requestKeyGroupInfo(router, keys.current.Key))
++	accounts.groups[8][0].Credentials = map[string]any{"model_mapping": map[string]any{"public-b": "actual-b"}}
++
++	after := decodeKeyGroupInfo(t, requestKeyGroupInfo(router, keys.current.Key))
++
++	require.Equal(t, "actual-b", after.Models[0].UpstreamModel)
++	require.NotEqual(t, before.Revision, after.Revision)
++	require.Equal(t, []int64{8, 8}, accounts.lookups)
++}
++
++func TestGatewayRoutesKeyGroupInfoReadsGroupAllowlistChangesImmediately(t *testing.T) {
++	router, keys, accounts := newKeyGroupRouteTestRouter()
++	accounts.groups[8][0].Credentials = map[string]any{"model_mapping": map[string]any{"public-a": "actual-a", "public-b": "actual-b"}}
++	keys.current.Group.ModelAllowlist = service.GroupModelAllowlist{Enabled: true, Models: []string{"public-a"}}
++	before := decodeKeyGroupInfo(t, requestKeyGroupInfo(router, keys.current.Key))
++	keys.current.Group.ModelAllowlist = service.GroupModelAllowlist{Enabled: true, Models: []string{"public-b"}}
++
++	after := decodeKeyGroupInfo(t, requestKeyGroupInfo(router, keys.current.Key))
++
++	require.Equal(t, "actual-a", before.Models[0].UpstreamModel)
++	require.Equal(t, "actual-b", after.Models[0].UpstreamModel)
++	require.NotEqual(t, before.Revision, after.Revision)
++}
++
++func TestGatewayRoutesKeyGroupInfoStillEnforcesCurrentAccessRestrictions(t *testing.T) {
++	tests := []struct {
++		name   string
++		mutate func(*service.APIKey)
++		status int
++	}{
++		{"revoked key", func(k *service.APIKey) { k.Status = service.StatusDisabled }, http.StatusUnauthorized},
++		{"expired key time", func(k *service.APIKey) { expired := time.Now().Add(-time.Minute); k.ExpiresAt = &expired }, http.StatusForbidden},
++		{"expired key status", func(k *service.APIKey) { k.Status = service.StatusAPIKeyExpired }, http.StatusForbidden},
++		{"disabled user", func(k *service.APIKey) { k.User.Status = service.StatusDisabled }, http.StatusUnauthorized},
++		{"disabled group", func(k *service.APIKey) { k.Group.Status = service.StatusDisabled }, http.StatusForbidden},
++		{"IP whitelist", func(k *service.APIKey) { k.IPWhitelist = []string{"192.168.50.5"} }, http.StatusForbidden},
++		{"exclusive group access removed", func(k *service.APIKey) { k.Group.IsExclusive = true }, http.StatusForbidden},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			router, keys, accounts := newKeyGroupRouteTestRouter()
++			tt.mutate(keys.current)
++			w := requestKeyGroupInfo(router, keys.current.Key)
++			require.Equal(t, tt.status, w.Code, w.Body.String())
++			require.Empty(t, accounts.lookups)
++			require.NotContains(t, w.Body.String(), "actual-a")
++		})
++	}
++}
+diff --git a/backend/internal/service/api_key_group_fresh_test.go b/backend/internal/service/api_key_group_fresh_test.go
+new file mode 100644
+index 000000000..59d65f6fa
+--- /dev/null
++++ b/backend/internal/service/api_key_group_fresh_test.go
+@@ -0,0 +1,105 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/config"
++	"github.com/stretchr/testify/require"
++)
++
++type keyGroupCurrentRepository struct {
++	APIKeyRepository
++	keys      map[string]*APIKey
++	authReads map[string]int
++}
++
++func (r *keyGroupCurrentRepository) GetByKey(_ context.Context, key string) (*APIKey, error) {
++	current := r.keys[key]
++	if current == nil {
++		return nil, ErrAPIKeyNotFound
++	}
++	copy := *current
++	return &copy, nil
++}
++
++func (r *keyGroupCurrentRepository) GetByKeyForAuth(ctx context.Context, key string) (*APIKey, error) {
++	r.authReads[key]++
++	return r.GetByKey(ctx, key)
++}
++
++func newKeyGroupCachedService(t *testing.T) (*APIKeyService, *keyGroupCurrentRepository) {
++	t.Helper()
++	groupID := int64(8)
++	group := &Group{ID: groupID, Name: "old-group", Platform: PlatformOpenAI, Hydrated: true, Status: StatusActive, SubscriptionType: SubscriptionTypeStandard, RateMultiplier: 1}
++	user := &User{ID: 7, Role: RoleUser, Status: StatusActive, Balance: 10}
++	repo := &keyGroupCurrentRepository{keys: map[string]*APIKey{}, authReads: map[string]int{}}
++	for i, key := range []string{"changing-key", "other-key"} {
++		repo.keys[key] = &APIKey{ID: int64(100 + i), Key: key, UserID: user.ID, User: user, Status: StatusActive, GroupID: &groupID, Group: group}
++	}
++	// Ristretto includes entry overhead in MaxCost; leave room for both keys.
++	cfg := &config.Config{APIKeyAuth: config.APIKeyAuthCacheConfig{L1Size: 4096, L1TTLSeconds: 3600}}
++	svc := NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
++	require.NotNil(t, svc.authCacheL1)
++	t.Cleanup(func() { svc.authCacheL1.Close() })
++	return svc, repo
++}
++
++func TestAPIKeyGroupDiscoveryRefreshesOnlyItsKeysRealAuthCache(t *testing.T) {
++	svc, repo := newKeyGroupCachedService(t)
++	ctx := context.Background()
++	for _, key := range []string{"changing-key", "other-key"} {
++		_, err := svc.GetByKey(ctx, key)
++		require.NoError(t, err)
++	}
++	svc.authCacheL1.Wait()
++	newGroupID := int64(9)
++	repo.keys["changing-key"].GroupID = &newGroupID
++	repo.keys["changing-key"].Group = &Group{ID: 9, Name: "new-group", Platform: PlatformOpenAI, Hydrated: true, Status: StatusActive, SubscriptionType: SubscriptionTypeStandard, RateMultiplier: 1}
++	stale, err := svc.GetByKey(ctx, "changing-key")
++	require.NoError(t, err)
++	require.Equal(t, int64(8), stale.Group.ID)
++	require.Equal(t, 1, repo.authReads["changing-key"])
++
++	metadataKey, err := svc.GetByKeyUncached(ctx, "changing-key")
++	require.NoError(t, err)
++	require.Equal(t, int64(9), metadataKey.Group.ID)
++	nextAuth, err := svc.GetByKey(ctx, "changing-key")
++	require.NoError(t, err)
++	require.Equal(t, int64(9), nextAuth.Group.ID)
++	require.Equal(t, 2, repo.authReads["changing-key"])
++	other, err := svc.GetByKey(ctx, "other-key")
++	require.NoError(t, err)
++	require.Equal(t, int64(8), other.Group.ID)
++	require.Equal(t, 1, repo.authReads["other-key"])
++}
++
++func TestAPIKeyGroupDiscoveryClearsRevokedAndDeletedKeysOldAuthCache(t *testing.T) {
++	for _, change := range []string{"revoked", "deleted"} {
++		t.Run(change, func(t *testing.T) {
++			svc, repo := newKeyGroupCachedService(t)
++			ctx := context.Background()
++			_, err := svc.GetByKey(ctx, "changing-key")
++			require.NoError(t, err)
++			svc.authCacheL1.Wait()
++			if change == "revoked" {
++				repo.keys["changing-key"].Status = StatusDisabled
++			} else {
++				delete(repo.keys, "changing-key")
++			}
++
++			_, metadataErr := svc.GetByKeyUncached(ctx, "changing-key")
++			nextAuth, authErr := svc.GetByKey(ctx, "changing-key")
++			if change == "revoked" {
++				require.NoError(t, metadataErr)
++				require.NoError(t, authErr)
++				require.Equal(t, StatusDisabled, nextAuth.Status)
++			} else {
++				require.True(t, errors.Is(metadataErr, ErrAPIKeyNotFound))
++				require.True(t, errors.Is(authErr, ErrAPIKeyNotFound))
++			}
++			require.Equal(t, 2, repo.authReads["changing-key"])
++		})
++	}
++}
+diff --git a/backend/internal/service/api_key_service.go b/backend/internal/service/api_key_service.go
+index 6b504ee55..b298a613d 100644
+--- a/backend/internal/service/api_key_service.go
++++ b/backend/internal/service/api_key_service.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"crypto/rand"
+ 	"encoding/hex"
++	"errors"
+ 	"fmt"
+ 	"html"
+ 	"math"
+@@ -791,6 +792,27 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
+ 	return apiKey, nil
+ }
+ 
++// GetByKeyUncached reads the current key, user permissions, IP restrictions and
++// group from the database. Key-scoped configuration discovery uses this path so
++// auth snapshots cannot hide revocation or an operator's group changes.
++func (s *APIKeyService) GetByKeyUncached(ctx context.Context, key string) (*APIKey, error) {
++	if len(key) == 0 || len(key) > MaxAPIKeyCredentialBytes || !utf8.ValidString(key) {
++		return nil, ErrAPIKeyNotFound
++	}
++	apiKey, err := s.apiKeyRepo.GetByKey(ctx, key)
++	if err != nil {
++		if errors.Is(err, ErrAPIKeyNotFound) {
++			s.InvalidateAuthCacheByKey(ctx, key)
++		}
++		return nil, fmt.Errorf("get current api key: %w", err)
++	}
++	// The inference request that follows discovery must not reuse an older
++	// snapshot of this key's group or permissions. Other keys remain cached.
++	s.InvalidateAuthCacheByKey(ctx, key)
++	s.compileAPIKeyIPRules(apiKey)
++	return apiKey, nil
++}
++
+ // Update 更新API Key
+ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req UpdateAPIKeyRequest) (*APIKey, error) {
+ 	if err := validateUpdateAPIKeyRequest(req); err != nil {
+diff --git a/backend/internal/service/key_group_models.go b/backend/internal/service/key_group_models.go
+new file mode 100644
+index 000000000..8582c38f4
+--- /dev/null
++++ b/backend/internal/service/key_group_models.go
+@@ -0,0 +1,95 @@
++package service
++
++import (
++	"context"
++	"fmt"
++	"sort"
++	"strings"
++)
++
++// KeyGroupModel describes request aliases for one actual upstream model. It
++// deliberately contains no account identifiers or upstream credentials.
++type KeyGroupModel struct {
++	ID            string   `json:"id"`
++	UpstreamModel string   `json:"upstream_model"`
++	Aliases       []string `json:"aliases"`
++}
++
++// GetKeyGroupModels reads the group's current account mappings directly. Model
++// discovery must not retain a cached catalogue after an operator changes a key's
++// group, its allowlist, or the accounts serving that group.
++func (s *GatewayService) GetKeyGroupModels(ctx context.Context, group *Group) ([]KeyGroupModel, error) {
++	if s == nil || s.accountRepo == nil || group == nil || group.ID <= 0 {
++		return nil, fmt.Errorf("key group model configuration is unavailable")
++	}
++	accounts, err := s.accountRepo.ListSchedulableByGroupID(ctx, group.ID)
++	if err != nil {
++		return nil, fmt.Errorf("read key group models: %w", err)
++	}
++	return keyGroupModelsFromAccounts(group, accounts), nil
++}
++
++func keyGroupModelsFromAccounts(group *Group, accounts []Account) []KeyGroupModel {
++	byTarget := make(map[string]map[string]struct{})
++	for i := range accounts {
++		account := &accounts[i]
++		if account.Status != StatusActive {
++			continue
++		}
++		if group.Platform != PlatformComposite && account.Platform != group.Platform && !mixedListingAccountAllowed(group.Platform, account) {
++			continue
++		}
++		candidates := make(map[string]struct{})
++		for alias, target := range account.GetModelMapping() {
++			candidates[alias] = struct{}{}
++			// A mapping target may also be a valid identity request (including
++			// a concrete model covered by a wildcard source). Validate it below.
++			candidates[target] = struct{}{}
++		}
++		// A concrete group allowlist also identifies models for unmapped or
++		// wildcard-mapped accounts. Wildcards themselves are not request IDs.
++		if group.ModelAllowlistEnabled() {
++			for _, alias := range group.ModelAllowlist.Models {
++				candidates[alias] = struct{}{}
++			}
++		}
++		for candidate := range candidates {
++			alias := strings.TrimSpace(candidate)
++			if alias == "" || strings.Contains(alias, "*") || !group.ModelAllowlist.Allows(alias) || !account.IsModelSupported(alias) {
++				continue
++			}
++			target := strings.TrimSpace(account.GetMappedModel(alias))
++			// OpenAI passthrough forwards the original model and ignores mapping
++			// targets, even if an account retains an old model_mapping.
++			if account.IsOpenAIPassthroughEnabled() {
++				target = alias
++			}
++			if target == "" || strings.Contains(target, "*") {
++				continue
++			}
++			if byTarget[target] == nil {
++				byTarget[target] = make(map[string]struct{})
++			}
++			byTarget[target][alias] = struct{}{}
++		}
++	}
++
++	models := make([]KeyGroupModel, 0, len(byTarget))
++	for target, aliasesSet := range byTarget {
++		aliases := make([]string, 0, len(aliasesSet))
++		for alias := range aliasesSet {
++			aliases = append(aliases, alias)
++		}
++		sort.Strings(aliases)
++		// The identity alias is the canonical request ID when it is allowed.
++		// Otherwise all aliases are equivalent, so use a stable request ID;
++		// clients can preserve any of the returned aliases they already use.
++		id := aliases[0]
++		if _, ok := aliasesSet[target]; ok {
++			id = target
++		}
++		models = append(models, KeyGroupModel{ID: id, UpstreamModel: target, Aliases: aliases})
++	}
++	sort.Slice(models, func(i, j int) bool { return models[i].UpstreamModel < models[j].UpstreamModel })
++	return models
++}
+diff --git a/backend/internal/service/key_group_models_test.go b/backend/internal/service/key_group_models_test.go
+new file mode 100644
+index 000000000..afd395125
+--- /dev/null
++++ b/backend/internal/service/key_group_models_test.go
+@@ -0,0 +1,112 @@
++package service
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func keyGroupModelAccount(platform string, mapping map[string]string) Account {
++	jsonMapping := make(map[string]any, len(mapping))
++	for alias, target := range mapping {
++		jsonMapping[alias] = target
++	}
++	return Account{ID: 5, Platform: platform, Type: "apikey", Status: StatusActive, Credentials: map[string]any{"model_mapping": jsonMapping}}
++}
++
++func TestKeyGroupModelsMergeRequestAliasesWithoutChangingTheirTarget(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformDeepseek}
++	account := keyGroupModelAccount(PlatformDeepseek, map[string]string{
++		"deepseek-flash":         "cn:deepseek-v4.1-flash",
++		"deepseek-v4.1-flash":    "cn:deepseek-v4.1-flash",
++		"cn:deepseek-v4.1-flash": "cn:deepseek-v4.1-flash",
++	})
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Equal(t, []KeyGroupModel{{
++		ID: "cn:deepseek-v4.1-flash", UpstreamModel: "cn:deepseek-v4.1-flash",
++		Aliases: []string{"cn:deepseek-v4.1-flash", "deepseek-flash", "deepseek-v4.1-flash"},
++	}}, models)
++}
++
++func TestKeyGroupModelsUseOnlyCurrentlyAllowedRequestAliases(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"public-model"}}}
++	account := keyGroupModelAccount(PlatformOpenAI, map[string]string{
++		"public-model": "actual-model", "other-alias": "actual-model", "actual-model": "actual-model",
++	})
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Equal(t, []KeyGroupModel{{ID: "public-model", UpstreamModel: "actual-model", Aliases: []string{"public-model"}}}, models)
++}
++
++func TestKeyGroupModelsDoNotCollapseDifferentActualModels(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI}
++	first := keyGroupModelAccount(PlatformOpenAI, map[string]string{"same-alias": "first-target"})
++	second := keyGroupModelAccount(PlatformOpenAI, map[string]string{"same-alias": "second-target"})
++
++	models := keyGroupModelsFromAccounts(group, []Account{first, second})
++
++	require.Len(t, models, 2)
++	require.Equal(t, "first-target", models[0].UpstreamModel)
++	require.Equal(t, "second-target", models[1].UpstreamModel)
++}
++
++func TestKeyGroupModelsExcludeInactiveAndWrongPlatformAccounts(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI}
++	active := keyGroupModelAccount(PlatformOpenAI, map[string]string{"active-model": "active-target"})
++	inactive := keyGroupModelAccount(PlatformOpenAI, map[string]string{"inactive-model": "inactive-target"})
++	inactive.Status = StatusDisabled
++	wrongPlatform := keyGroupModelAccount(PlatformAnthropic, map[string]string{"wrong-model": "wrong-target"})
++
++	models := keyGroupModelsFromAccounts(group, []Account{inactive, wrongPlatform, active})
++
++	require.Equal(t, []KeyGroupModel{{ID: "active-model", UpstreamModel: "active-target", Aliases: []string{"active-model"}}}, models)
++}
++
++func TestKeyGroupModelsResolveConcreteAllowlistAgainstWildcardMapping(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"public-model-v2"}}}
++	account := keyGroupModelAccount(PlatformOpenAI, map[string]string{"public-model-*": "actual-v2"})
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Equal(t, []KeyGroupModel{{ID: "public-model-v2", UpstreamModel: "actual-v2", Aliases: []string{"public-model-v2"}}}, models)
++}
++
++func TestKeyGroupModelsListSingleAllowlistedModelOnUnmappedAccount(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gemini-4-hydrogen"}}}
++	account := keyGroupModelAccount(PlatformOpenAI, nil)
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Equal(t, []KeyGroupModel{{ID: "gemini-4-hydrogen", UpstreamModel: "gemini-4-hydrogen", Aliases: []string{"gemini-4-hydrogen"}}}, models)
++}
++
++func TestKeyGroupModelsDoNotReturnWildcardsAsRequestIDs(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI}
++	account := keyGroupModelAccount(PlatformOpenAI, map[string]string{"public-*": "actual-model"})
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Empty(t, models)
++}
++
++func TestKeyGroupModelsUseAValidConcreteTargetCoveredByWildcardMapping(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI}
++	account := keyGroupModelAccount(PlatformOpenAI, map[string]string{"gemini-*": "gemini-4-hydrogen"})
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Equal(t, []KeyGroupModel{{ID: "gemini-4-hydrogen", UpstreamModel: "gemini-4-hydrogen", Aliases: []string{"gemini-4-hydrogen"}}}, models)
++}
++
++func TestKeyGroupModelsRespectPassthroughIgnoringMappingTargets(t *testing.T) {
++	group := &Group{ID: 8, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"public-model"}}}
++	account := keyGroupModelAccount(PlatformOpenAI, map[string]string{"public-model": "obsolete-target"})
++	account.Extra = map[string]any{"openai_passthrough": true}
++
++	models := keyGroupModelsFromAccounts(group, []Account{account})
++
++	require.Equal(t, []KeyGroupModel{{ID: "public-model", UpstreamModel: "public-model", Aliases: []string{"public-model"}}}, models)
++}
+diff --git a/docs/key-group-introspection.md b/docs/key-group-introspection.md
+new file mode 100644
+index 000000000..f591f7268
+--- /dev/null
++++ b/docs/key-group-introspection.md
+@@ -0,0 +1,52 @@
++# API Key group and model discovery
++
++`GET /v1/sub2api/key-group` returns the authenticated API key's current group and
++the concrete request aliases for its actual upstream models. Authenticate with
++the same `Authorization: Bearer <your-sub2api-key>` header used for generation.
++The endpoint does not accept another key or group ID as input.
++
++Example response:
++
++```json
++{
++  "object": "sub2api.key_group",
++  "schema_version": 1,
++  "key": {"id": 100, "group_id": 42},
++  "group": {"id": 42, "name": "assistant", "platform": "openai", "status": "active"},
++  "models": [{
++    "id": "provider-model",
++    "upstream_model": "provider-model",
++    "aliases": ["assistant-model", "provider-model"]
++  }],
++  "revision": "<hash-of-safe-response-fields>"
++}
++```
++
++Each `models` entry represents an actual mapped target. Several aliases for the
++same target are combined into one entry. `id` is a requestable alias: the target's
++identity alias when allowed, otherwise a deterministic alias for that target.
++Clients may retain any alias in `aliases` they already use. A client that requires
++one model must check that the catalogue contains exactly one target, rather than
++selecting the first entry from a multi-model group.
++
++Models are read from the group's current schedulable accounts and filtered by
++the current group allowlist and account mapping rules. Exact allowlist entries
++also provide concrete candidates for unmapped or wildcard-mapped accounts.
++Wildcards are not returned as request IDs. An empty catalogue indicates that the
++current configuration does not identify a concrete, currently requestable model;
++discovery does not substitute a guessed model or a global default list.
++
++The key, owner permissions, IP restrictions and group are read from the database
++for each discovery request. Discovery invalidates only this key's prior auth
++snapshot so the following generation request can use the same current group and
++allowlist. Removed, disabled or expired keys, inactive users/groups and disallowed
++IPs are rejected by the existing authentication guards. Reading metadata does not
++require a positive balance, consume quota, or update the key's last-used time.
++
++Responses use `Cache-Control: no-store`. `revision` hashes only safe response
++fields and changes with group/model/alias changes. Responses contain no API keys,
++account identifiers, credentials, internal account routing tables, or other keys.
++
++The endpoint intentionally bypasses auth and model-list snapshots for discovery;
++ordinary generation requests keep their existing caching behavior. No schema
++migration or admin credential is needed by clients.
