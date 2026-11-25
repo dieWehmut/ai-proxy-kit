@@ -78,7 +78,7 @@ def main():
     p.add_argument("--env-file", type=pathlib.Path, default=proxykit.ROOT / "runtime/stack.env")
     p.add_argument("--base-url", help="Sub2API admin URL, default: local stack port")
     p.add_argument("--admin-cli", type=pathlib.Path, help="Use an existing sub2api-admin skill CLI for admin operations")
-    p.add_argument("--provider", choices=("all", "antigravity", "workbuddy", "aistudio"), default="all")
+    p.add_argument("--provider", choices=("all", "antigravity", "workbuddy", "aistudio", "qoder"), default="all")
     p.add_argument("--upstream-url", help="Override container-network upstream URL (single provider only)")
     p.add_argument("--test", action="store_true", help="Create/reuse a provider-scoped API key and verify routed generation")
     p.add_argument("--stream", action="store_true", help="--test: verify a real SSE response including [DONE]")
@@ -123,7 +123,7 @@ def main():
             group = api.admin("POST", "groups", {"name": label, "platform": "openai", "rate_multiplier": 1,
                                                 "subscription_type": "standard", "is_exclusive": False})
             groups.append(group)
-        ports = {"antigravity": 8045, "workbuddy": 7863, "aistudio": 2048}
+        ports = {"antigravity": 8045, "workbuddy": 7863, "aistudio": 2048, "qoder": 8790}
         url = (args.upstream_url or f"http://{name}:{ports[name]}").rstrip("/")
         credential = {"base_url": url, "api_key": values[name.upper() + "_API_KEY"]}
         account = next((a for a in accounts if a["name"] == label), None)
