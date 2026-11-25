@@ -75,6 +75,31 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 kit.read_env(path)
 
+class LocalAccessTests(unittest.TestCase):
+    def args(self, root):
+        return argparse.Namespace(env_file=root / "runtime/stack.env", import_antigravity=None,
+                                  antigravity_data=None, import_workbuddy=None, upstream_proxy=None,
+                                  **{name + "_port": None for name in (*kit.SERVICES, "aistudio")})
+
+    def test_access_hints_follow_stack_env_without_leaking_into_git(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(kit, "ROOT", pathlib.Path(folder)):
+            root = pathlib.Path(folder)
+            values = kit.initialize(self.args(root))
+            values["AISTUDIO_PORT"] = "17860"
+            values["AISTUDIO_WEB_PASSWORD"] = "rotated-console-password"
+            kit.write_local_access(values)
+            hints = (root / "runtime/LOCAL_ACCESS.txt").read_text()
+            console = (root / "runtime/open-aistudio.html").read_text()
+            self.assertIn(values["AISTUDIO_API_KEY"], hints)
+            self.assertIn("rotated-console-password", hints)
+            self.assertIn("http://127.0.0.1:17860/login", console)
+            self.assertIn("rotated-console-password", console)
+            self.assertEqual(stat.S_IMODE((root / "runtime/LOCAL_ACCESS.txt").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE((root / "runtime/open-aistudio.html").stat().st_mode), 0o600)
+            first = hints
+            kit.write_local_access(values)
+            self.assertEqual((root / "runtime/LOCAL_ACCESS.txt").read_text(), first)
+
     def test_workbuddy_build_retains_configuration_edited_while_checking_binary(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(kit, "ROOT", pathlib.Path(folder)), \
                 mock.patch.object(workbuddy_build, "proxykit", kit):

@@ -129,6 +129,43 @@ def initialize(args):
     return values
 
 
+def write_local_access(values):
+    """Regenerate local access hints from stack.env so they never drift."""
+    port = {name: values[name.upper() + "_PORT"] for name in (*SERVICES, "aistudio")}
+    lines = [
+        "AI Proxy Kit - 本机访问（本文件含密钥，请只在本机查看）",
+        "",
+        f"Sub2API: http://127.0.0.1:{port['sub2api']}",
+        f"管理员邮箱: {values.get('SUB2API_EMAIL', 'admin@sub2api.local')}",
+        f"管理员密码: {values['SUB2API_PASSWORD']}",
+        "",
+        f"WorkBuddy: http://127.0.0.1:{port['workbuddy']}/panel/",
+        f"API / 管理 Key: {values['WORKBUDDY_API_KEY']}",
+        "",
+        f"Antigravity: http://127.0.0.1:{port['antigravity']}",
+        f"管理密码: {values['ANTIGRAVITY_WEB_PASSWORD']}",
+        f"API Key: {values['ANTIGRAVITY_API_KEY']}",
+        "",
+        f"AI Studio: http://127.0.0.1:{port['aistudio']}",
+        f"控制台密码: {values['AISTUDIO_WEB_PASSWORD']}",
+        f"API Key: {values['AISTUDIO_API_KEY']}",
+        "",
+        "一键启动: 在项目根目录执行 bash start.sh all；AI Studio 另执行 bash start.sh aistudio。",
+        "Windows 入口: install.cmd、start.cmd、status.cmd、check.cmd、open-aistudio.cmd；全部网关监听 0.0.0.0。",
+    ]
+    private_write(ROOT / "runtime/LOCAL_ACCESS.txt", "\n".join(lines) + "\n")
+    console = (
+        '<!doctype html><html lang="zh"><meta charset="utf-8">'
+        '<title>本机 AI Studio 登录</title>'
+        '<p>正在打开本机 AI Studio 控制台…</p>'
+        f'<form method="post" action="http://127.0.0.1:{port["aistudio"]}/login">'
+        f'<input type="hidden" name="password" value="{values["AISTUDIO_WEB_PASSWORD"]}">'
+        '<button type="submit">打开本机 AI Studio</button></form>'
+        '<script>document.forms[0].submit()</script></html>'
+    )
+    private_write(ROOT / "runtime/open-aistudio.html", console)
+
+
 def run(command, **kwargs):
     return subprocess.run(command, check=True, **kwargs)
 
@@ -326,7 +363,7 @@ def check(name, values, model=None, stream=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("install", "start", "stop", "status", "check"))
+    parser.add_argument("command", choices=("install", "start", "stop", "status", "check", "access"))
     parser.add_argument("service", nargs="?", default="all", choices=(*SERVICES, "aistudio", "all"))
     parser.add_argument("--env-file", type=pathlib.Path, default=ROOT / "runtime/stack.env")
     parser.add_argument("--prepare-only", action="store_true", help="Generate configuration without Docker or network changes")
@@ -360,6 +397,10 @@ def main():
         for name in services:
             check(name, values, args.model, args.stream)
         return
+    if args.command == "access":
+        write_local_access(values)
+        print(ROOT / "runtime/open-aistudio.html")
+        return
     docker = docker_command()
     compose(docker, args, values, "config", "--quiet")
     if args.command in ("install", "start"):
@@ -369,6 +410,7 @@ def main():
             wait_service(name, values)
         if "antigravity" in services:
             enable_antigravity(values)
+        write_local_access(values)
         for name in services:
             print(f"{name}: listening on 0.0.0.0:{values[name.upper() + '_PORT']}; local URL {service_url(name, values)}", flush=True)
         print(f"Credentials stay in {args.env_file}; no secrets are printed.", flush=True)
