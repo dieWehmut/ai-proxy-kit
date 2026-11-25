@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const NOVNC_CDN_URL = "https://esm.sh/@novnc/novnc@1.4.0/lib/rfb.js";
 const NOVNC_PUBLIC_URL = "/vendor/novnc/core/rfb.js";
+const NOVNC_CDN_MARKERS = ["esm.sh/@novnc", "@novnc/novnc", NOVNC_CDN_URL];
 
 const REQUIRED_VENDOR_FILES = [
   "LICENSE.txt",
@@ -52,16 +53,33 @@ function makeTreeWritable(root) {
   }
 }
 
+function findCdnReferences(source) {
+  return NOVNC_CDN_MARKERS.filter(marker => source.includes(marker));
+}
+
+function listJavaScriptFiles(directory) {
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listJavaScriptFiles(entryPath));
+    } else if (entry.isFile() && entry.name.endsWith(".js")) {
+      files.push(entryPath);
+    }
+  }
+  return files.sort();
+}
+
 function rewriteBundle(bundlePath) {
   const source = fs.readFileSync(bundlePath, "utf8");
   const replacements = source.split(NOVNC_CDN_URL).length - 1;
 
   if (replacements === 0) {
-    return {
-      bundlePath,
-      status: source.includes(NOVNC_PUBLIC_URL) ? "already" : "unrelated",
-      replacements: 0,
-    };
+    if (findCdnReferences(source).length > 0) {
+      return { bundlePath, status: "cdn-reference", replacements: 0 };
+    }
+    const status = source.includes(NOVNC_PUBLIC_URL) ? "already" : "unrelated";
+    return { bundlePath, status, replacements: 0 };
   }
 
   const temporaryPath = `${bundlePath}.novnc-${process.pid}.tmp`;
@@ -85,11 +103,26 @@ function installNovnc({ sourceDir, distDir }) {
 
   const assetsDir = path.join(distDir, "assets");
   requireDirectory(assetsDir, "The AI Studio asset directory");
-  const bundles = fs.readdirSync(assetsDir, { withFileTypes: true })
-    .filter(entry => entry.isFile() && entry.name.endsWith(".js"))
-    .map(entry => path.join(assetsDir, entry.name));
+  const bundles = listJavaScriptFiles(assetsDir);
 
   const results = bundles.map(rewriteBundle);
+
+  const residualReferences = bundles
+    .map(bundlePath => ({ bundlePath, references: findCdnReferences(fs.readFileSync(bundlePath, "utf8")) }))
+    .filter(result => result.references.length > 0);
+  if (residualReferences.length > 0) {
+    const detail = residualReferences
+      .map(({ bundlePath, references }) => {
+        const relativePath = path.relative(distDir, bundlePath).split(path.sep).join("/");
+        return `${relativePath} (${references.join(", ")})`;
+      })
+      .join("; ");
+    throw new Error(
+      `noVNC CDN references remain in AI Studio assets after installation: ${detail}. ` +
+      "Refusing to serve a CDN-dependent UI.",
+    );
+  }
+
   const rewritten = results.filter(result => result.status === "rewritten");
   const already = results.filter(result => result.status === "already");
 
@@ -107,6 +140,7 @@ function installNovnc({ sourceDir, distDir }) {
 
 module.exports = {
   NOVNC_CDN_URL,
+  NOVNC_CDN_MARKERS,
   NOVNC_PUBLIC_URL,
   installNovnc,
   rewriteBundle,

@@ -100,6 +100,31 @@ test("bundle rewriter recognizes unrelated and already patched bundles", t => {
   assert.deepEqual(rewriteBundle(bundlePath), { bundlePath, status: "unrelated", replacements: 0 });
   fs.writeFileSync(bundlePath, `import("${NOVNC_PUBLIC_URL}");`);
   assert.deepEqual(rewriteBundle(bundlePath), { bundlePath, status: "already", replacements: 0 });
+  fs.writeFileSync(bundlePath, `import("${NOVNC_PUBLIC_URL}");import("https://esm.sh/@novnc/novnc@1.5.0/lib/rfb.js");`);
+  assert.deepEqual(rewriteBundle(bundlePath), { bundlePath, status: "cdn-reference", replacements: 0 });
+});
+
+test("installer rejects a patched bundle when another bundle still references a noVNC CDN build", t => {
+  const { distDir, assetsDir } = makeFixture(t);
+  fs.writeFileSync(path.join(assetsDir, "index-patched.js"), `import("${NOVNC_PUBLIC_URL}");`);
+  fs.writeFileSync(path.join(assetsDir, "vnc-new.js"), 'import("https://esm.sh/@novnc/novnc@1.5.0/lib/rfb.js");');
+
+  assert.throws(
+    () => installNovnc({ sourceDir: vendorDir, distDir }),
+    /noVNC CDN references remain in AI Studio assets after installation: .*vnc-new\.js.*@novnc\/novnc/,
+  );
+  assert.ok(fs.existsSync(path.join(distDir, "vendor/novnc/core/rfb.js")));
+});
+
+test("installer succeeds when every bundle is free of noVNC CDN references", t => {
+  const { distDir, assetsDir } = makeFixture(t);
+  fs.writeFileSync(path.join(assetsDir, "index-patched.js"), `import("${NOVNC_PUBLIC_URL}");`);
+  fs.writeFileSync(path.join(assetsDir, "other.js"), "console.log('other');");
+
+  const result = installNovnc({ sourceDir: vendorDir, distDir });
+  assert.equal(result.rewrittenBundles, 0);
+  assert.equal(result.alreadyPatchedBundles, 1);
+  assert.equal(result.replacements, 0);
 });
 
 test("installer accepts a read-only vendor source", t => {
