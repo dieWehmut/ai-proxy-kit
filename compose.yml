@@ -136,6 +136,44 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  qoder:
+    profiles: [qoder]
+    # Qoder2API-Hub: multi-account OpenAI/Anthropic gateway for Qoder (CN + Intl).
+    # --lan is mandatory in the image CMD: it forces an API key. We pin that key
+    # from stack.env instead of letting the container log a random one.
+    image: ${QODER_IMAGE:-ghcr.io/shuishuipingan/qoder2api-hub:latest}
+    container_name: qoder-proxy
+    hostname: ${QODER_HOSTNAME:-ai-proxy-kit-qoder}
+    ports: ["0.0.0.0:${QODER_PORT:-8790}:8790"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8790"
+      API_KEY: ${QODER_API_KEY:?Run install.sh first}
+      QODER_PANEL_PASSWORD: ${QODER_PANEL_PASSWORD:?Run install.sh first}
+      TZ: ${TZ:-Asia/Shanghai}
+      HTTP_PROXY: ${UPSTREAM_PROXY:-}
+      HTTPS_PROXY: ${UPSTREAM_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,::1,antigravity,workbuddy,sub2api,aistudio
+    # The panel password reaches the app as a CLI flag so it is hashed into
+    # accounts/settings.json on first start. `$$` is Compose's escape: Compose
+    # leaves `$QODER_PANEL_PASSWORD` for the container's sh to expand from the
+    # environment. A single `$` is interpolated on the HOST (where the variable
+    # does not exist) and silently yields an EMPTY password -- verified with a
+    # real `compose run`: `[$PW]` -> `[]`, `[$$PW]` -> `[secret123]`.
+    command: [sh, -c, 'exec python qoder_proxy.py --lan --panel-password "$$QODER_PANEL_PASSWORD"']
+    volumes:
+      - ./runtime/qoder/accounts:/app/accounts
+      - ./runtime/qoder/logs:/app/logs
+      - ./runtime/qoder/usage:/app/usage:ro
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:%s/ping' % os.environ.get('PORT','8790'),timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging: *logging
+
 volumes:
   sub2api-data:
   postgres-data:
