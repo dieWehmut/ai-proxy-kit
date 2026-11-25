@@ -23,7 +23,7 @@ class FakeHTTP:
         self.group = {"id": 4, "name": "AI Proxy Kit / Aistudio", "platform": "openai"}
         self.account = {
             "id": 3, "name": self.group["name"], "platform": "openai", "type": "apikey",
-            "credentials": {"base_url": "http://aistudio:7860"},
+            "credentials": {"base_url": "http://aistudio:2048"},
             "credentials_status": {"has_api_key": True}, "group_ids": [4],
             "status": "active", "schedulable": True,
         }
@@ -99,7 +99,7 @@ class ConnectionTests(unittest.TestCase):
         folder = self._stack.enter_context(tempfile.TemporaryDirectory())
         self.root = pathlib.Path(folder)
         self.values = {"SUB2API_JWT": "synthetic-admin-jwt", "SUB2API_BASE_URL": "http://sub2api.fixture",
-                       "AISTUDIO_API_KEY": "synthetic-upstream-key", "AISTUDIO_PORT": "7860"}
+                       "AISTUDIO_API_KEY": "synthetic-upstream-key", "AISTUDIO_PORT": "2048"}
         self.http = FakeHTTP(self.values)
         self.output = io.StringIO()
         self.receipts_path = self.root / "runtime/sub2api-connections.json"
@@ -118,7 +118,7 @@ class ConnectionTests(unittest.TestCase):
 
     def save_success(self, **overrides):
         receipt = {"base_url": "http://sub2api.fixture", "account_id": 3, "group_id": 4,
-                   "upstream_url": "http://aistudio:7860", "api_key_id": 7,
+                   "upstream_url": "http://aistudio:2048", "api_key_id": 7,
                    "api_key": "synthetic-scoped-key", "tested_model": "gemini-4-hydrogen",
                    "generation": "PASS", "stream": False, "operator_note": "retain this metadata"}
         receipt.update(overrides)
@@ -163,7 +163,7 @@ class ConnectionTests(unittest.TestCase):
 
     def test_account_identity_and_group_checks_remain_required(self):
         cases = (("platform", "anthropic"), ("type", "oauth"), ("group_ids", []),
-                 ("credentials", {"base_url": "http://different.fixture:7860"}))
+                 ("credentials", {"base_url": "http://different.fixture:2048"}))
         for field, value in cases:
             with self.subTest(field=field), mock.patch.dict(self.http.account, {field: value}):
                 with self.assertRaises(ValueError):
@@ -289,9 +289,9 @@ class ConnectionTests(unittest.TestCase):
                 self.assertNotIn("generation", self.receipt())
 
     def test_trailing_slashes_preserve_receipt_identity(self):
-        self.save_success(base_url="http://sub2api.fixture/", upstream_url="http://aistudio:7860/")
+        self.save_success(base_url="http://sub2api.fixture/", upstream_url="http://aistudio:2048/")
         self.http.account["credentials"]["base_url"] += "/"
-        self.run_connection("--base-url", "http://sub2api.fixture/", "--upstream-url", "http://aistudio:7860/")
+        self.run_connection("--base-url", "http://sub2api.fixture/", "--upstream-url", "http://aistudio:2048/")
         self.assertEqual(self.receipt()["api_key_id"], 7)
         self.assertEqual(self.receipt()["generation"], "PASS")
 

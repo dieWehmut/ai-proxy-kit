@@ -123,7 +123,7 @@ def main():
             group = api.admin("POST", "groups", {"name": label, "platform": "openai", "rate_multiplier": 1,
                                                 "subscription_type": "standard", "is_exclusive": False})
             groups.append(group)
-        ports = {"antigravity": 8045, "workbuddy": 7863, "aistudio": 7860}
+        ports = {"antigravity": 8045, "workbuddy": 7863, "aistudio": 2048}
         url = (args.upstream_url or f"http://{name}:{ports[name]}").rstrip("/")
         credential = {"base_url": url, "api_key": values[name.upper() + "_API_KEY"]}
         account = next((a for a in accounts if a["name"] == label), None)

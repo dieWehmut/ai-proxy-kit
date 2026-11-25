@@ -1,4 +1,0 @@
-services:
-  aistudio2api:
-    volumes:
-      - ./services/aistudio2api/models.json:/app/configs/models.json:ro

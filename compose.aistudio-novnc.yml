@@ -1,9 +1,0 @@
-services:
-  aistudio:
-    command:
-      - node
-      - --require
-      - /app/proxy-kit/preload.cjs
-      - main.js
-    volumes:
-      - ./services/aistudio-novnc:/app/proxy-kit:ro

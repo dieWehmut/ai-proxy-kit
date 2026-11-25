@@ -1,5 +1,10 @@
 # AI Studio noVNC 本地化验证（2026-11-25）
 
+> **历史：Build 通道已停用。** 本记录只说明已移除的 noVNC 自托管实现。当前服务为
+> Compose 服务 `aistudio`（AIStudio2API Playground，容器端口 2048），不再提供 noVNC。
+> 当前迁移证据见
+> [aistudio-playground-migration-20261125.md](aistudio-playground-migration-20261125.md)。
+
 ## 部署
 
 ```

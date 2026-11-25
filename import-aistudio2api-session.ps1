@@ -4,7 +4,7 @@ param(
     [Parameter(Position = 0)][string]$Source = '',
     [string]$Distribution = '',
     [string]$DataDir = '',
-    [string]$Container = 'aistudio2api-local'
+    [string]$Container = 'ai-proxy-kit-aistudio-1'
 )
 $ErrorActionPreference = 'Stop'
 $wsl = Join-Path $env:WINDIR 'System32\wsl.exe'
@@ -44,7 +44,7 @@ if ($PSScriptRoot -match '^\\\\wsl(?:\.localhost|\$)\\([^\\]+)\\(.*)$') {
 }
 if ($Distribution) { $arguments = @('-d', $Distribution) }
 
-if (-not $DataDir) { $DataDir = Join-Path $PSScriptRoot 'runtime\aistudio2api' }
+if (-not $DataDir) { $DataDir = Join-Path $PSScriptRoot 'runtime\aistudio' }
 $null = New-Item -ItemType Directory -Path $DataDir -Force
 $DataDir = (Resolve-Path -LiteralPath $DataDir).ProviderPath
 $sessionDestination = Join-Path $DataDir 'session.json'
@@ -57,7 +57,7 @@ $linuxSessionPath = $linuxDataDir.TrimEnd('/') + '/session.json'
 & $wsl @arguments --exec chmod 600 $linuxSessionPath
 if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict session file permissions in WSL.' }
 
-# The documented docker run command mounts this directory at /data.
+# The aistudio service in compose.yml mounts this directory at /data.
 $containerSessionPath = '/data/session.json'
 & $wsl @arguments -- docker exec $Container aistudio2api setup --storage-state $containerSessionPath
 exit $LASTEXITCODE

@@ -1,4 +1,8 @@
-"""Regression checks for the merged Aistudio Compose configuration."""
+"""Compose contract checks for the four public AI Proxy Kit services.
+
+The contract covers the services that publish host ports.  PostgreSQL and
+Redis remain private dependencies of sub2api and do not expose ports.
+"""
 
 import json
 import os
@@ -10,12 +14,12 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+PUBLIC_SERVICES = {"antigravity", "workbuddy", "sub2api", "aistudio"}
+
 SYNTHETIC_ENV = {
-    "AISTUDIO_PORT": "7860",
-    "AISTUDIO_API_KEY": "synthetic-api-key",
-    "AISTUDIO_WEB_PASSWORD": "synthetic-console-password",
-    "AISTUDIO2API_PORT": "2048",
-    "AISTUDIO2API_API_KEY": "synthetic-playground-api-key",
+    "AISTUDIO_API_KEY": "synthetic-aistudio-api-key",
+    "AISTUDIO_ADMIN_PASSWORD": "synthetic-aistudio-admin-password",
+    "AISTUDIO_PORT": "2048",
     "ANTIGRAVITY_API_KEY": "synthetic-antigravity-api-key",
     "ANTIGRAVITY_WEB_PASSWORD": "synthetic-antigravity-web-password",
     "WORKBUDDY_API_KEY": "synthetic-workbuddy-api-key",
@@ -24,6 +28,30 @@ SYNTHETIC_ENV = {
     "SUB2API_PASSWORD": "synthetic-sub2api-password",
     "JWT_SECRET": "synthetic-jwt-secret",
     "TOTP_ENCRYPTION_KEY": "synthetic-totp-key",
+}
+
+# Host overrides must not leak into the resolved configuration.
+SCRUBBED_KEYS = set(SYNTHETIC_ENV) | {
+    "AISTUDIO_IMAGE",
+    "AISTUDIO_ADMIN_AUTH",
+    "AISTUDIO_ADMIN_USER",
+    "AISTUDIO_CHANNELS",
+    "AISTUDIO_WAA_BACKEND",
+    "ANTIGRAVITY_IMAGE",
+    "ANTIGRAVITY_PORT",
+    "WORKBUDDY_IMAGE",
+    "WORKBUDDY_PORT",
+    "SUB2API_IMAGE",
+    "SUB2API_PORT",
+    "SUB2API_EMAIL",
+    "UPSTREAM_PROXY",
+    "TZ",
+    "LOCAL_UID",
+    "LOCAL_GID",
+    "COMPOSE_FILE",
+    "COMPOSE_PROFILES",
+    "COMPOSE_ENV_FILES",
+    "COMPOSE_PROJECT_NAME",
 }
 
 
@@ -41,105 +69,152 @@ def docker_compose_available():
     return result.returncode == 0
 
 
+def compose_environment():
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in SCRUBBED_KEYS
+    }
+    environment.update(SYNTHETIC_ENV)
+    return environment
+
+
 class AistudioComposeTests(unittest.TestCase):
-    def test_proxy_kit_entrypoints_exist(self):
-        for name in ("preload.cjs", "novnc.cjs"):
-            with self.subTest(name=name):
-                self.assertTrue(
-                    (ROOT / "services" / "aistudio-novnc" / name).is_file(),
-                    "missing services/aistudio-novnc/" + name,
-                )
-
-    def test_merged_config_keeps_aistudio_contract(self):
+    @classmethod
+    def setUpClass(cls):
         if not docker_compose_available():
-            self.skipTest("docker compose is unavailable")
+            raise unittest.SkipTest("docker compose is unavailable")
 
-        with tempfile.TemporaryDirectory() as folder:
-            env_file = pathlib.Path(folder) / "aistudio-compose.env"
-            env_file.write_text(
-                "".join(f"{key}={value}\n" for key, value in SYNTHETIC_ENV.items()),
-                encoding="utf-8",
+        cls._temp_dir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._temp_dir.cleanup)
+        env_file = pathlib.Path(cls._temp_dir.name) / "synthetic-compose.env"
+        env_file.write_text(
+            "".join(f"{key}={value}\n" for key, value in SYNTHETIC_ENV.items()),
+            encoding="utf-8",
+        )
+
+        process = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                str(env_file),
+                "--profile",
+                "antigravity",
+                "--profile",
+                "workbuddy",
+                "--profile",
+                "sub2api",
+                "--profile",
+                "aistudio",
+                "-f",
+                "compose.yml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=compose_environment(),
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if process.returncode != 0:
+            raise AssertionError(
+                "docker compose config exited with status "
+                f"{process.returncode}: {process.stderr.strip()}"
             )
-            process = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "--env-file",
-                    str(env_file),
-                    "--profile",
-                    "aistudio",
-                    "-f",
-                    "compose.yml",
-                    "-f",
-                    "compose.aistudio-novnc.yml",
-                    "config",
-                    "--format",
-                    "json",
-                ],
-                cwd=ROOT,
-                env=self.compose_environment(),
-                text=True,
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
 
-        self.assertEqual(
-            process.returncode,
-            0,
-            f"docker compose config exited with status {process.returncode}",
-        )
-        config = json.loads(process.stdout)
-        services = config.get("services")
-        self.assertIsInstance(services, dict, "merged config has no services")
-        self.assertIn("aistudio", services, "merged config has no aistudio service")
-        aistudio = services["aistudio"]
-
-        ports = [
-            port
-            for port in aistudio.get("ports") or []
-            if isinstance(port, dict) and str(port.get("target")) == "7860"
-        ]
-        self.assertEqual(len(ports), 1, "aistudio must expose exactly its 7860 target")
-        self.assertEqual(ports[0].get("host_ip"), "0.0.0.0")
-        self.assertEqual(str(ports[0].get("published")), "7860")
-
-        self.assertEqual(
-            aistudio.get("command"),
-            ["node", "--require", "/app/proxy-kit/preload.cjs", "main.js"],
-        )
-
-        volumes = [
-            volume
-            for volume in aistudio.get("volumes") or []
-            if isinstance(volume, dict)
-        ]
-        proxy_mounts = [
-            volume for volume in volumes if volume.get("target") == "/app/proxy-kit"
-        ]
-        self.assertEqual(len(proxy_mounts), 1, "missing /app/proxy-kit mount")
-        proxy_mount = proxy_mounts[0]
-        self.assertEqual(proxy_mount.get("type"), "bind")
-        self.assertIs(proxy_mount.get("read_only"), True)
-        self.assertTrue(proxy_mount.get("source"), "/app/proxy-kit mount has no source")
-        self.assertEqual(
-            pathlib.Path(proxy_mount["source"]).resolve(),
-            (ROOT / "services" / "aistudio-novnc").resolve(),
-        )
-
-        auth_mounts = [
-            volume for volume in volumes if volume.get("target") == "/app/configs/auth"
-        ]
-        self.assertEqual(len(auth_mounts), 1, "missing aistudio auth mount")
+        cls.config = json.loads(process.stdout)
+        cls.services = cls.config.get("services") or {}
 
     @staticmethod
-    def compose_environment():
-        environment = os.environ.copy()
-        environment.pop("COMPOSE_FILE", None)
-        environment.pop("COMPOSE_PROFILES", None)
-        environment.pop("COMPOSE_ENV_FILES", None)
-        environment.update(SYNTHETIC_ENV)
-        return environment
+    def published_service_names(services):
+        return {
+            name
+            for name, service in services.items()
+            if isinstance(service, dict) and service.get("ports")
+        }
+
+    def service(self, name):
+        self.assertIn(name, self.services, f"missing {name} service")
+        return self.services[name]
+
+    def test_public_service_set_is_exactly_the_four_services(self):
+        self.assertEqual(self.published_service_names(self.services), PUBLIC_SERVICES)
+        for name in PUBLIC_SERVICES:
+            self.assertIn(name, self.services)
+        self.assertNotIn("aistudio2api", self.services)
+
+    def test_aistudio_uses_the_playground_image_and_port(self):
+        aistudio = self.service("aistudio")
+        self.assertEqual(aistudio.get("image"), "ghcr.io/mag1cfall/aistudio2api:latest")
+
+        ports = aistudio.get("ports") or []
+        self.assertEqual(len(ports), 1, "aistudio must publish exactly one port")
+        port = ports[0]
+        self.assertEqual(port.get("host_ip"), "0.0.0.0")
+        self.assertEqual(str(port.get("published")), "2048")
+        self.assertEqual(str(port.get("target")), "2048")
+
+    def test_aistudio_environment_matches_the_playground_contract(self):
+        environment = self.service("aistudio").get("environment") or {}
+        expected = {
+            "LISTEN_ADDR": "0.0.0.0:2048",
+            "AISTUDIO_AUTH_STATES": "/data/auth",
+            "UPSTREAM_CHANNELS": "playground",
+            "AUTO_START": "true",
+        }
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(environment.get(key), value)
+
+        self.assertIn("ADMIN_AUTH_ENABLED", environment)
+        self.assertIn(
+            str(environment["ADMIN_AUTH_ENABLED"]).lower(),
+            {"true", "false"},
+            "ADMIN_AUTH_ENABLED must be a boolean value",
+        )
+        # Values from the temporary env file prove that no runtime stack env
+        # file supplied the required credentials.
+        self.assertEqual(
+            environment.get("PROXY_API_KEY"), SYNTHETIC_ENV["AISTUDIO_API_KEY"]
+        )
+        self.assertEqual(
+            environment.get("ADMIN_PASSWORD"),
+            SYNTHETIC_ENV["AISTUDIO_ADMIN_PASSWORD"],
+        )
+
+    def test_aistudio_mounts_runtime_data(self):
+        volumes = self.service("aistudio").get("volumes") or []
+        data_mounts = [
+            volume
+            for volume in volumes
+            if isinstance(volume, dict) and volume.get("target") == "/data"
+        ]
+        self.assertEqual(len(data_mounts), 1, "aistudio must mount exactly /data")
+        mount = data_mounts[0]
+        self.assertEqual(mount.get("type"), "bind")
+        self.assertEqual(
+            pathlib.Path(mount.get("source", "")).resolve(),
+            (ROOT / "runtime" / "aistudio" / "data").resolve(),
+        )
+
+    def test_other_services_keep_their_public_ports(self):
+        expected = {
+            "antigravity": "8045",
+            "workbuddy": "7863",
+            "sub2api": "8080",
+        }
+        for name, port_number in expected.items():
+            with self.subTest(service=name):
+                ports = self.service(name).get("ports") or []
+                self.assertEqual(len(ports), 1, f"{name} must publish exactly one port")
+                port = ports[0]
+                self.assertEqual(port.get("host_ip"), "0.0.0.0")
+                self.assertEqual(str(port.get("published")), port_number)
+                self.assertEqual(str(port.get("target")), port_number)
 
 
 if __name__ == "__main__":

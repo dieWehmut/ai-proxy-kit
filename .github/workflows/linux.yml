@@ -13,62 +13,33 @@ jobs:
         with:
           node-version: '22'
       - run: node tests/test_google_session_export.mjs
-      - name: Test self-hosted noVNC
-        run: node --test tests/test_aistudio_novnc.cjs
       - run: bash install.sh --prepare-only
       - name: Validate all gateway bindings
         run: |
           docker compose --env-file runtime/stack.env --profile '*' config --format json > /tmp/proxy-kit-compose.json
           python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/proxy-kit-compose.json'))
-          for name in ('antigravity','workbuddy','sub2api','aistudio'):
-              assert all(p['host_ip']=='0.0.0.0' for p in d['services'][name]['ports'])
-          for name in ('postgres','redis'):
-              assert not d['services'][name].get('ports')
-          PY
-      - name: Validate merged AI Studio noVNC overlay
-        run: |
-          docker compose --env-file runtime/stack.env -f compose.yml -f compose.aistudio-novnc.yml --profile '*' config --format json > /tmp/proxy-kit-compose-novnc.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
 
-          with open('/tmp/proxy-kit-compose-novnc.json') as config:
+          with open('/tmp/proxy-kit-compose.json') as config:
               services = json.load(config)['services']
 
-          aistudio = services['aistudio']
-          command = aistudio['command']
-          assert command and command[0] == 'node', 'AI Studio must start with node'
-          assert any(
-               option == '--require' and 'preload.cjs' in value
-               for option, value in zip(command, command[1:])
-          ), 'AI Studio command must preload preload.cjs'
-          assert any(
-              port.get('host_ip') == '0.0.0.0'
-              and str(port.get('published')) == '7860'
-              and port.get('target') == 7860
-              for port in aistudio.get('ports', [])
-          ), 'AI Studio must publish 0.0.0.0:7860'
-
-          expected_mounts = {
-              '/app/configs/auth': ('runtime/aistudio/auth', False),
-              '/app/data': ('runtime/aistudio/data', False),
-              '/app/proxy-kit': ('services/aistudio-novnc', True),
+          expected_ports = {
+              'antigravity': 8045,
+              'workbuddy': 7863,
+              'sub2api': 8080,
+              'aistudio': 2048,
           }
-          mounts = {mount['target']: mount for mount in aistudio['volumes']}
-          assert len(aistudio['volumes']) == len(expected_mounts), 'Unexpected or duplicate AI Studio mounts'
-          assert mounts.keys() == expected_mounts.keys(), 'AI Studio mounts were lost or replaced'
-          for target, (source, read_only) in expected_mounts.items():
-              mount = mounts[target]
-              assert mount['type'] == 'bind', f'{target} must be a bind mount'
-              assert Path(mount['source']) == Path(source).resolve(), f'{target} has the wrong source'
-              assert mount.get('read_only', False) == read_only, f'{target} has the wrong access mode'
-          assert mounts['/app/proxy-kit'].get('read_only') is True, 'The noVNC overlay mount must stay read-only'
+          for name, port in expected_ports.items():
+              ports = services[name].get('ports') or []
+              assert len(ports) == 1, f'{name} must publish exactly one port'
+              published = ports[0]
+              assert published.get('host_ip') == '0.0.0.0', f'{name} must bind 0.0.0.0'
+              assert str(published.get('published')) == str(port), f'{name} must publish {port}'
+              assert published.get('target') == port, f'{name} must forward to {port}'
 
-          for name in ('antigravity', 'workbuddy', 'sub2api', 'aistudio'):
-              assert services[name].get('ports'), f'{name} must publish a port'
-              assert all(port['host_ip'] == '0.0.0.0' for port in services[name]['ports']), f'{name} binding changed'
+          image = services['aistudio'].get('image', '')
+          assert 'aistudio2api' in image, f'AI Studio must use the aistudio2api image, got {image!r}'
+
           for name in ('postgres', 'redis'):
               assert not services[name].get('ports'), f'{name} ports must stay internal'
           PY

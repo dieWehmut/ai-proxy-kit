@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $scriptPath = Join-Path $root 'import-aistudio2api-session.ps1'
 $commandPath = Join-Path $root 'import-aistudio2api-session.cmd'
+$composePath = Join-Path $root 'compose.yml'
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -24,13 +25,13 @@ foreach ($name in @('Source', 'Distribution', 'DataDir', 'Container')) {
 $containerParameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Container' })[0]
 Assert-True ($containerParameter.StaticType.FullName -eq 'System.String') 'Container must be a string parameter.'
 Assert-True ($null -ne $containerParameter.DefaultValue) 'Container must have a default value.'
-Assert-True ($containerParameter.DefaultValue.Extent.Text -eq "'aistudio2api-local'") 'Container must default to aistudio2api-local.'
+Assert-True ($containerParameter.DefaultValue.Extent.Text -eq "'ai-proxy-kit-aistudio-1'") 'Container must default to ai-proxy-kit-aistudio-1.'
 
 Assert-True ($text.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders')) 'Registry Downloads resolution was removed.'
 Assert-True ($text.Contains('{374DE290-123F-4565-9164-39C4925E467B}')) 'Registry Downloads value name was removed.'
 Assert-True ($text.Contains("Join-Path `$env:USERPROFILE 'Downloads'")) 'Downloads fallback was removed.'
 Assert-True ($text.Contains('ai-proxy-kit-google-session.json')) 'The default exported session filename was removed.'
-Assert-True ($text.Contains("Join-Path `$PSScriptRoot 'runtime\aistudio2api'")) 'The default runtime/aistudio2api data directory was removed.'
+Assert-True ($text.Contains("Join-Path `$PSScriptRoot 'runtime\aistudio'")) 'The default runtime/aistudio data directory was removed.'
 Assert-True ($text.Contains("Join-Path `$DataDir 'session.json'")) 'The copied session must be stored as session.json.'
 Assert-True ($text.Contains('Copy-Item -LiteralPath $Source -Destination $sessionDestination -Force')) 'The exported session must be copied into the repository runtime directory.'
 Assert-True ($text.Contains("`$containerSessionPath = '/data/session.json'")) 'The documented /data container path was removed.'
@@ -85,4 +86,18 @@ foreach ($commandName in @('type ', 'more ', 'findstr ')) {
     Assert-True (-not $commandText.ToLowerInvariant().Contains($commandName)) "The cmd entry point must not print session data with $commandName."
 }
 
-Write-Host 'PASS: AIStudio2API import parameters, path handling, conditional forwarding, and non-disclosure checks.'
+Assert-True (Test-Path -LiteralPath $composePath -PathType Leaf) 'compose.yml is missing.'
+$composeText = [IO.File]::ReadAllText($composePath)
+Assert-True ($composeText -match '(?m)^name:\s*ai-proxy-kit\s*$') 'compose.yml must keep the ai-proxy-kit project name that produces the default container name.'
+$aistudioMatch = [regex]::Match($composeText, '(?ms)^  aistudio:\s*\r?\n(.*?)(?=^\S|\z)')
+Assert-True $aistudioMatch.Success 'compose.yml is missing the aistudio service.'
+$aistudioBlock = $aistudioMatch.Groups[1].Value
+$imageMatch = [regex]::Match($aistudioBlock, '(?m)^\s+image:\s*(.+)$')
+Assert-True $imageMatch.Success 'The aistudio service has no image.'
+Assert-True ($imageMatch.Groups[1].Value.Trim() -match 'aistudio2api') 'The aistudio service image must be aistudio2api.'
+$portsMatch = [regex]::Match($aistudioBlock, '(?m)^\s+ports:\s*\[[^\]]*\]')
+Assert-True $portsMatch.Success 'The aistudio service has no ports mapping.'
+Assert-True ($portsMatch.Value -match ':\$\{AISTUDIO_PORT:-2048\}:2048|:2048\s*\]') 'The aistudio service must expose container port 2048.'
+Assert-True ($aistudioBlock -match '(?m)^\s+-\s+\./runtime/aistudio/data:/data\s*$') 'The aistudio service must mount ./runtime/aistudio/data at /data.'
+
+Write-Host 'PASS: AIStudio2API import parameters, path handling, compose service, conditional forwarding, and non-disclosure checks.'

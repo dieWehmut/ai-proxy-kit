@@ -1,5 +1,9 @@
 # Windows 本机 AI Studio 反代测试（2026-11-24）
 
+> **历史：Build 通道已停用。** 本记录保留 2026-11-24 的 7860/noVNC 排障证据，不再作为
+> 当前部署或验收指引。Playground 与端口迁移见
+> [aistudio-playground-migration-20261125.md](aistudio-playground-migration-20261125.md)。
+
 ## 结论
 
 Windows 本机到 LXC158 的 AI Studio HTTP 反代链路正常：

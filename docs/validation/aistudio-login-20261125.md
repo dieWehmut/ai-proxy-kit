@@ -1,5 +1,9 @@
 # AI Studio 登录诊断（2026-11-25）
 
+> **历史：Build 通道已停用。** 本记录描述旧 Build 反代的登录和 `/api/status` 错误形状，
+> 不能作为当前 Playground 的操作指引。当前流程见
+> [aistudio-playground-migration-20261125.md](aistudio-playground-migration-20261125.md)。
+
 ## 结论
 
 本次登录未成功，不能记录为生成验收通过。导入 Google cookie 后，容器只短暂显示

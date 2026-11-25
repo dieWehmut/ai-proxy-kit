@@ -1,5 +1,10 @@
 # AI Studio Playground 迁移验证（2026-11-25）
 
+> 本记录中的 7870 是本次 LXC 独立部署的**宿主机端口**。仓库 Compose 服务名是
+> `aistudio`，容器端口是 `2048`；LXC 现网通过 `AISTUDIO_PORT=7870` 发布为
+> `0.0.0.0:7870 -> 容器 2048`。同栈 Sub2API 使用 `http://aistudio:2048`；只有跨栈访问
+> 才使用宿主机地址 `http://172.18.0.1:7870`。
+
 ## 结论
 
 LXC158 的 AI Studio 生成上游已从 7860 的 Build 通道迁移到 7870 的
@@ -133,3 +138,26 @@ API Key: 使用与 PROXY_API_KEY 相同的值
 
 本记录只包含本次实测的状态、错误消息、模型 ID 和 HTTP 结果，不包含邮箱、Cookie、API key、
 管理员凭据或其他秘密。
+
+## 7. 与仓库 Compose 的端口对应
+
+上面的 7870 结果来自 LXC 上的 Playground 部署。迁移到仓库 Compose 后，服务名统一为
+`aistudio`，`compose.yml` 中的容器监听固定为 `0.0.0.0:2048`，宿主端口为
+`${AISTUDIO_PORT:-2048}`。LXC158 保留现有入口时设置：
+
+```text
+AISTUDIO_PORT=7870
+```
+
+因此：
+
+| 访问方 | 地址 |
+| --- | --- |
+| LXC 宿主机或本机客户端 | `http://127.0.0.1:7870` |
+| 同一 Compose 网络中的 Sub2API | `http://aistudio:2048` |
+| 不同网络中的容器，经宿主机网关 | `http://172.18.0.1:7870`（按实际网关核对） |
+
+`7870` 只属于宿主机发布端口差异；容器内部仍是 `2048`，不是另开了一个 AI Studio 服务。
+Sub2API 与 `aistudio` 同栈时不要填宿主机 IP，也不要在容器内填 `127.0.0.1`。修改端口后
+必须重建容器，并以 `docker compose --profile aistudio port aistudio 2048` 和
+`/api/status` 重新验收。

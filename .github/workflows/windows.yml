@@ -16,11 +16,11 @@ jobs:
       - name: Parse scripts and verify installer functions
         shell: powershell
         run: ./tests/Test-Functions.ps1
-      - name: Parse and run session import tests
+      - name: Parse and run AIStudio2API import tests
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $testPath = Join-Path (Get-Location) 'tests/Test-SessionImport.ps1'
+          $testPath = Join-Path (Get-Location) 'tests/Test-Aistudio2ApiImport.ps1'
           if (-not (Test-Path -LiteralPath $testPath)) {
             throw "Required test file is missing: $testPath"
           }
@@ -41,11 +41,11 @@ jobs:
       - name: Parse scripts and verify installer functions
         shell: pwsh
         run: ./tests/Test-Functions.ps1
-      - name: Parse and run session import tests
+      - name: Parse and run AIStudio2API import tests
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $testPath = Join-Path (Get-Location) 'tests/Test-SessionImport.ps1'
+          $testPath = Join-Path (Get-Location) 'tests/Test-Aistudio2ApiImport.ps1'
           if (-not (Test-Path -LiteralPath $testPath)) {
             throw "Required test file is missing: $testPath"
           }
