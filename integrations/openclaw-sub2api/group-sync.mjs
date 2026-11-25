@@ -23,6 +23,37 @@ export function metadataUrl(baseUrl) {
   return baseUrl.replace(/\/+$/, '') + '/sub2api/key-group';
 }
 
+/** Stock Sub2API exposes the key group's allowlist through the standard list endpoint. */
+export function modelsUrl(baseUrl) {
+  return baseUrl.replace(/\/+$/, '') + '/models';
+}
+
+// A Sub2API build without the key-group patch answers 404/405/501 here; the
+// OpenAI-compatible model list is then the only key-scoped source available.
+const MODELS_FALLBACK_STATUS = new Set([404, 405, 501]);
+const MODELS_GROUP_NAME = 'key-models';
+
+/**
+ * Interpret an OpenAI-compatible model list as a key-group snapshot.
+ * Only an unambiguous single model may be adopted; aliases of one target are
+ * deduplicated so a repeated id never looks like a second model.
+ */
+export function normalizeModelsList(payload, preferredAlias) {
+  const data = payload?.data ?? payload;
+  const ids = [];
+  if (Array.isArray(data)) {
+    for (const entry of data) {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+  }
+  if (ids.length !== 1) {
+    throw new DiscoveryError('non-unique-model', 'The key must expose exactly one model');
+  }
+  const id = preferredAlias && ids.includes(preferredAlias) ? preferredAlias : ids[0];
+  return { model: { id, upstream_model: ids[0], aliases: ids } };
+}
+
 /** Reject ambiguous groups; aliases of the same target are not extra models. */
 export function normalizeMetadata(payload, preferredAlias) {
   const data = payload?.data ?? payload;
@@ -195,8 +226,10 @@ export function updateConfig(config, snapshot, baseUrl, previousSnapshot) {
   const sameTarget = !previousSnapshot ||
     (previousSnapshot.model.upstream_model === snapshot.model.upstream_model &&
       previousSnapshot.group.platform === snapshot.group.platform);
-  const oldEntry = sameTarget && provider.models?.find((model) => model.id === snapshot.model.id ||
-    model.id === previousSnapshot?.model.id);
+  // Keep any richer metadata already published for the same model id, even when
+  // the discovery tier changed the reported platform (key-group -> model list).
+  const oldEntry = provider.models?.find((model) => model.id === snapshot.model.id) ??
+    (sameTarget ? provider.models?.find((model) => model.id === previousSnapshot?.model.id) : undefined);
   provider.baseUrl = inferenceBase;
   provider.api = api;
   provider.models = [{ ...(oldEntry || entry), id: entry.id, api,
@@ -257,6 +290,9 @@ export class KeyGroupClient {
     this.current = undefined;
     this.inFlight = undefined;
     this.lastError = undefined;
+    // Set when discovery authoritatively reports more than one candidate model.
+    // The cache is kept for diagnostics, but no turn may be overridden.
+    this.ambiguous = false;
     this.lastWarning = 0;
     this.generation = 0;
     this.enrolledGeneration = undefined;
@@ -448,23 +484,60 @@ export class KeyGroupClient {
     finally { this.inFlight = undefined; }
   }
 
+  async request(url) {
+    const response = await this.fetchImpl(url, {
+      headers: { Authorization: 'Bearer ' + this.key, Accept: 'application/json' },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    return { ok: response.ok, status: response.status,
+      body: response.ok ? await response.json() : undefined };
+  }
+
+  /** A synthetic, credential-free snapshot for the model-list fallback tier. */
+  modelsSnapshot(listed) {
+    const identity = positiveInteger(this.current?.key_id, 1);
+    return {
+      schema_version: 1,
+      key_id: identity,
+      group: { id: identity, name: MODELS_GROUP_NAME, platform: 'openai', status: 'active' },
+      model: listed.model,
+      revision: 'models:' + keyFingerprint(listed.model.aliases.join('\n')),
+    };
+  }
+
   async discover() {
     try {
       if (!this.key) throw new DiscoveryError('missing-key', 'Sub2API API key is not configured');
       const generation = await this.beginRequest();
-      const response = await this.fetchImpl(metadataUrl(this.baseUrl), {
-        headers: { Authorization: 'Bearer ' + this.key, Accept: 'application/json' },
-        cache: 'no-store',
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      if (!response.ok) throw new DiscoveryError('http-' + response.status, 'Key group discovery returned HTTP ' + response.status);
-      const snapshot = normalizeMetadata(await response.json(), this.current?.model.id ?? this.preferredAlias);
+      const alias = this.current?.model.id ?? this.preferredAlias;
+      const metadata = await this.request(metadataUrl(this.baseUrl));
+      let snapshot;
+      if (metadata.ok) {
+        snapshot = normalizeMetadata(metadata.body, alias);
+      } else if (MODELS_FALLBACK_STATUS.has(metadata.status)) {
+        const listed = await this.request(modelsUrl(this.baseUrl));
+        if (!listed.ok) {
+          throw new DiscoveryError('http-' + listed.status, 'Model list discovery returned HTTP ' + listed.status);
+        }
+        if (!this.fallbackNoted) {
+          this.fallbackNoted = true;
+          this.logger.info?.('Sub2API group sync: key-group metadata is unavailable; using the key-scoped model list');
+        }
+        snapshot = this.modelsSnapshot(normalizeModelsList(listed.body, alias));
+      } else {
+        throw new DiscoveryError('http-' + metadata.status, 'Key group discovery returned HTTP ' + metadata.status);
+      }
       transportFor(snapshot.group.platform, this.baseUrl);
+      this.ambiguous = false;
       snapshot.checked_at = new Date(this.now()).toISOString();
       return await this.commit(snapshot, generation);
     } catch (error) {
       // Do not include fetch exception text, URLs or server bodies in diagnostics.
       const code = error instanceof DiscoveryError ? error.code : 'discovery-unavailable';
+      // An authoritative ambiguity is not a transient failure: holding the old
+      // model would pin the bot to a target the key may no longer serve.
+      if (code === 'non-unique-model') this.ambiguous = true;
       this.lastError = { code, at: new Date(this.now()).toISOString(), keeping_last_model: Boolean(this.current) };
       if (this.now() - this.lastWarning >= 30000 || !this.lastWarning) {
         this.logger.warn?.('Sub2API group sync: ' + code + (this.current ? '; keeping last available model' : '; no cached model'));

@@ -46,12 +46,14 @@ export function registerIntegration(api, dependencies = {}) {
     const config = readConfig(configPath, api.config);
     if (!isManagedTurn(context, config)) return;
     const snapshot = await client.refresh({ fresh: true });
-    if (!snapshot) return;
+    // An ambiguous key (several candidate models) leaves the operator's own
+    // configuration authoritative instead of pinning a possibly dead target.
+    if (!snapshot || client.ambiguous) return;
     return { providerOverride: 'sub2api', modelOverride: snapshot.model.id, fallbacksOverride: [] };
   }, { priority: 1000 });
 
   const currentDefinition = (context = {}) => {
-    if (!enabled() || !client.current) return null;
+    if (!enabled() || !client.current || client.ambiguous) return null;
     const definition = runtimeModel(client.current, baseUrl);
     const configured = readConfig(configPath, api.config).models?.providers?.sub2api?.models?.find((model) => model.id === definition.id);
     const resolved = configured ? { ...definition, ...configured, provider: definition.provider,
@@ -90,6 +92,6 @@ export function registerIntegration(api, dependencies = {}) {
 export default {
   id: PLUGIN_ID,
   name: 'Sub2API Group Model Sync',
-  version: '0.1.0',
+  version: '0.1.1',
   register: registerIntegration,
 };
