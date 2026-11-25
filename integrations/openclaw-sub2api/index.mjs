@@ -92,6 +92,6 @@ export function registerIntegration(api, dependencies = {}) {
 export default {
   id: PLUGIN_ID,
   name: 'Sub2API Group Model Sync',
-  version: '0.1.1',
+  version: '0.1.2',
   register: registerIntegration,
 };

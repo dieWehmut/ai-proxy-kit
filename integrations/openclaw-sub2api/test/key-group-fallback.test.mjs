@@ -72,9 +72,15 @@ test('duplicate ids collapse to one without false ambiguity', () => {
   });
 });
 
-test('zero models is rejected as non-unique', () => {
+test('an empty model list is reported as empty, not as ambiguity', () => {
   const normalizeModelsList = exported('normalizeModelsList');
-  assertNonUniqueModel(() => normalizeModelsList({ object: 'list', data: [] }));
+  // An empty group means "no healthy account right now", which must keep the
+  // last good model instead of engaging the ambiguity guard.
+  assert.throws(() => normalizeModelsList({ object: 'list', data: [] }), (error) => {
+    assert.ok(error instanceof mod.DiscoveryError);
+    assert.equal(error.code, 'empty-model-list');
+    return true;
+  });
 });
 
 test('two distinct models are rejected as non-unique', () => {
@@ -93,9 +99,9 @@ test('malformed entries are skipped', () => {
   });
 });
 
-test('all-malformed entries leave no ids and throw', () => {
+test('all-malformed entries leave no ids and report an empty list', () => {
   const normalizeModelsList = exported('normalizeModelsList');
-  assertNonUniqueModel(() => normalizeModelsList({
+  assert.throws(() => normalizeModelsList({
     object: 'list',
     data: [{}, { id: '' }, { id: '  ' }, { id: 7 }, null],
   }));
@@ -112,7 +118,11 @@ test('bare array payload is accepted', () => {
 test('non-object payloads throw DiscoveryError rather than TypeError', () => {
   const normalizeModelsList = exported('normalizeModelsList');
   for (const payload of [null, 'x', 42]) {
-    assertNonUniqueModel(() => normalizeModelsList(payload));
+    assert.throws(() => normalizeModelsList(payload), (error) => {
+      assert.ok(error instanceof mod.DiscoveryError, 'expected DiscoveryError, got ' + error?.constructor?.name);
+      assert.ok(!(error instanceof TypeError), 'must not be a TypeError');
+      return true;
+    });
   }
 });
 
