@@ -8,6 +8,7 @@ import math
 import os
 import pathlib
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -61,8 +62,21 @@ def normalize(data, now=None):
     return {"accountName": name, "cookies": cookies, "origins": []}
 
 
+def ensure_private_directory(directory):
+    try:
+        metadata = directory.lstat()
+    except FileNotFoundError:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = directory.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"Auth directory must not be a symbolic link: {directory}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"Auth directory path is not a directory: {directory}")
+    os.chmod(directory, 0o700)
+
+
 def save_auth(state, directory):
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ensure_private_directory(directory)
     digest = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
     indices = []
     for file in directory.glob("auth-*.json"):
@@ -71,6 +85,7 @@ def save_auth(state, directory):
             continue
         indices.append(int(match[1]))
         if json.loads(file.read_text()).get("proxyKitSourceDigest") == digest:
+            os.chmod(file, 0o600)
             return file, False
     state = dict(state, proxyKitSourceDigest=digest)
     index = max(indices, default=-1) + 1
@@ -84,9 +99,18 @@ def save_auth(state, directory):
             file = directory / f"auth-{index}.json"
             try:
                 os.link(pending, file)
-                return file, True
             except FileExistsError:
                 index += 1
+                continue
+            try:
+                os.chmod(file, 0o600)
+            except OSError:
+                try:
+                    file.unlink()
+                except OSError:
+                    pass
+                raise
+            return file, True
     finally:
         pending.unlink()
 
@@ -116,37 +140,46 @@ def status_summary(data, auth_index=None):
     status = data.get("status", data)
     if not isinstance(status, dict) or not isinstance(status.get("browserConnected"), bool):
         raise ValueError("AI Studio status response requires boolean browserConnected")
-    current = status.get("currentAuthIndex", -1)
-    busy = status.get("isSystemBusy", False)
+    current = status.get("currentAuthIndex")
+    busy = status.get("isSystemBusy")
     accounts = status.get("accountDetails", [])
-    if type(current) is not int or current < -1 or not isinstance(busy, bool):
-        raise ValueError("AI Studio status response has invalid currentAuthIndex or isSystemBusy")
     if not isinstance(accounts, list):
         raise ValueError("AI Studio status response requires an accountDetails array")
+    states = {}
     for account in accounts:
         if (not isinstance(account, dict) or type(account.get("index")) is not int or
-                account["index"] < 0 or
-                any(not isinstance(account.get(field, False), bool) for field in ("isExpired", "isInvalid"))):
+                account["index"] < 0):
             raise ValueError("AI Studio status response has invalid accountDetails fields")
-    indices = {account["index"] for account in accounts}
-    expired = {account["index"] for account in accounts if account.get("isExpired")}
-    invalid = {account["index"] for account in accounts if account.get("isInvalid")}
+        expired = account.get("isExpired")
+        invalid = account.get("isInvalid")
+        states[account["index"]] = (
+            (expired, invalid) if isinstance(expired, bool) and isinstance(invalid, bool) else None)
+    indices = set(states)
+    expired = {index for index, state in states.items() if state is not None and state[0]}
+    invalid = {index for index, state in states.items() if state is not None and state[1]}
+    unknown = {index for index, state in states.items() if state is None}
+    current_known = type(current) is int and current in indices
+    busy_known = isinstance(busy, bool)
     imported = "unchecked"
     if auth_index is not None:
         imported = "recognized"
         if auth_index not in indices:
             imported = "missing"
+        elif auth_index in unknown:
+            imported = "unknown"
         elif auth_index in invalid:
             imported = "invalid"
         elif auth_index in expired:
             imported = "expired"
     if auth_index is None:
-        ready = (status["browserConnected"] and not busy and current in indices and
-                 current not in expired | invalid)
+        ready = (status["browserConnected"] and busy_known and not busy and current_known and
+                 not unknown and
+                 current not in (expired | invalid))
     else:
         # A healthy connection to a different account is not proof that this
         # import became active. Readiness requires the exact imported index.
-        ready = (status["browserConnected"] and not busy and current == auth_index and
+        ready = (status["browserConnected"] and busy_known and not busy and current_known and
+                 current == auth_index and not unknown and
                  imported == "recognized")
     return dict(browserConnected=status["browserConnected"], currentAuthIndex=current,
                 isSystemBusy=busy, expiredAccounts=len(expired), invalidAccounts=len(invalid),

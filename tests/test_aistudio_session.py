@@ -3,6 +3,7 @@ import importlib.util
 import contextlib
 import io
 import json
+import os
 import pathlib
 import stat
 import subprocess
@@ -97,6 +98,46 @@ class SessionImportTests(unittest.TestCase):
             self.assertEqual(first.name, "auth-1.json")
             self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o600)
             self.assertEqual(json.loads(original.read_text()), {"accountName": "existing fixture account"})
+
+    def test_existing_directory_and_reused_file_permissions_are_tightened(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder) / "auth"
+            root.mkdir()
+            os.chmod(root, 0o755)
+            state = session.normalize({"cookies": [self.cookie()]}, now=100)
+            file, created = session.save_auth(state, root)
+            self.assertTrue(created)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+
+            os.chmod(root, 0o755)
+            os.chmod(file, 0o644)
+            reused, duplicate_created = session.save_auth(state, root)
+            self.assertFalse(duplicate_created)
+            self.assertEqual(reused, file)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(reused.stat().st_mode), 0o600)
+
+    def test_symbolic_link_auth_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            target = root / "target"
+            target.mkdir()
+            link = root / "auth"
+            link.symlink_to(target, target_is_directory=True)
+            state = session.normalize({"cookies": [self.cookie()]}, now=100)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                session.save_auth(state, link)
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_chmod_failure_aborts_import_before_it_can_claim_private_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder) / "auth"
+            state = session.normalize({"cookies": [self.cookie()]}, now=100)
+            with mock.patch.object(session.os, "chmod", side_effect=PermissionError("fixture chmod failure")):
+                with self.assertRaises(PermissionError):
+                    session.save_auth(state, root)
+            self.assertFalse((root / "auth-0.json").exists())
 
     def test_concurrent_import_cannot_overwrite_another_account_or_publish_partial_json(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -216,8 +257,8 @@ class ReloadAuthTests(unittest.TestCase):
                  ({"isSystemBusy": True}, "recognized"),
                  ({"currentAuthIndex": -1}, "recognized"),
                  ({"accountDetails": []}, "missing"),
-                 ({"accountDetails": [dict(index=0, isExpired=True)]}, "expired"),
-                 ({"accountDetails": [dict(index=0, isInvalid=True)]}, "invalid")]
+                 ({"accountDetails": [dict(index=0, isExpired=True, isInvalid=False)]}, "expired"),
+                 ({"accountDetails": [dict(index=0, isExpired=False, isInvalid=True)]}, "invalid")]
         for updates, imported in cases:
             with self.subTest(imported=imported, fields=list(updates)):
                 result = session.status_summary(self.payload(**updates), auth_index=0)
@@ -228,11 +269,50 @@ class ReloadAuthTests(unittest.TestCase):
         self.assertEqual(result["importedAccount"], "missing")
 
     def test_actual_readiness_checks_active_account_even_without_import_index(self):
-        result = session.status_summary(self.payload(accountDetails=[dict(index=0, isExpired=True)]))
+        result = session.status_summary(self.payload(
+            accountDetails=[dict(index=0, isExpired=True, isInvalid=False)]))
         self.assertFalse(result["ready"])
         self.assertEqual(result["expiredAccounts"], 1)
         self.assertFalse(session.status_summary(self.payload(accountDetails=[]))["ready"])
         self.assertTrue(session.status_summary(self.payload())["ready"])
+
+    def test_missing_or_wrong_type_busy_flag_is_unknown_and_not_ready(self):
+        data = self.payload()
+        del data["status"]["isSystemBusy"]
+        result = session.status_summary(data, auth_index=0)
+        self.assertIsNone(result["isSystemBusy"])
+        self.assertFalse(result["ready"])
+        for value in ("false", 0, None, []):
+            with self.subTest(value=value):
+                result = session.status_summary(self.payload(isSystemBusy=value), auth_index=0)
+                self.assertFalse(result["ready"])
+                self.assertEqual(result["isSystemBusy"], value)
+
+    def test_missing_or_wrong_type_account_flags_are_unknown_and_not_ready(self):
+        for field in ("isExpired", "isInvalid"):
+            with self.subTest(field=field, kind="missing"):
+                data = self.payload()
+                del data["status"]["accountDetails"][0][field]
+                result = session.status_summary(data, auth_index=0)
+                self.assertFalse(result["ready"])
+                self.assertEqual(result["importedAccount"], "unknown")
+            for value in ("false", 0, None, []):
+                with self.subTest(field=field, kind="wrong-type", value=value):
+                    data = self.payload()
+                    data["status"]["accountDetails"][0][field] = value
+                    result = session.status_summary(data, auth_index=0)
+                    self.assertFalse(result["ready"])
+                    self.assertEqual(result["importedAccount"], "unknown")
+
+    def test_current_auth_index_must_be_an_int_listed_in_account_details(self):
+        data = self.payload()
+        del data["status"]["currentAuthIndex"]
+        self.assertFalse(session.status_summary(data, auth_index=0)["ready"])
+        for value in (True, False, 0.0, "0", -1, 1, 2):
+            with self.subTest(value=value):
+                result = session.status_summary(self.payload(currentAuthIndex=value), auth_index=0)
+                self.assertFalse(result["ready"])
+        self.assertTrue(session.status_summary(self.payload(currentAuthIndex=0), auth_index=0)["ready"])
 
     def test_other_healthy_account_does_not_make_the_import_ready(self):
         result = session.status_summary(self.payload(
@@ -288,11 +368,13 @@ class ReloadAuthTests(unittest.TestCase):
         base = "http://127.0.0.1:7860"
         for field, imported in (("isExpired", "expired"), ("isInvalid", "invalid")):
             with self.subTest(field=field):
+                account = dict(index=0, isExpired=False, isInvalid=False)
+                account[field] = True
                 opener = mock.Mock()
                 opener.open.side_effect = [
                     self.response(base + "/", b"console"),
                     self.response(base + "/api/status", json.dumps(self.payload(
-                        accountDetails=[dict(index=0, **{field: True})])).encode()),
+                        accountDetails=[account])).encode()),
                 ]
                 with mock.patch.object(session.urllib.request, "build_opener", return_value=opener), \
                         mock.patch.object(session.time, "monotonic", return_value=0), \
@@ -308,11 +390,10 @@ class ReloadAuthTests(unittest.TestCase):
                  ({"status": None}, "boolean browserConnected"),
                  ({"status": {}}, "boolean browserConnected"),
                  (self.payload(browserConnected="false"), "boolean browserConnected"),
-                 (self.payload(currentAuthIndex=True), "currentAuthIndex or isSystemBusy"),
-                 (self.payload(isSystemBusy="false"), "currentAuthIndex or isSystemBusy"),
                  (self.payload(accountDetails={}), "accountDetails array"),
                  (self.payload(accountDetails=[None]), "accountDetails fields"),
-                 (self.payload(accountDetails=[dict(index=0, isExpired="false")]), "accountDetails fields")]
+                 (self.payload(accountDetails=[dict(index="0", isExpired=False, isInvalid=False)]),
+                  "accountDetails fields")]
         for data, error in cases:
             with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                 session.status_summary(data)
@@ -379,7 +460,7 @@ class SessionCLITests(unittest.TestCase):
             self.export(source)
             session.proxykit.private_write(env, "AISTUDIO_PORT=7860\nAISTUDIO_WEB_PASSWORD=synthetic-console-password\n")
             summary = session.status_summary(ReloadAuthTests().payload(
-                accountDetails=[dict(index=0, isExpired=True)]), auth_index=0)
+                accountDetails=[dict(index=0, isExpired=True, isInvalid=False)]), auth_index=0)
             with mock.patch.object(session, "reload_auth", return_value=summary):
                 result, output = self.run_main(root, source, "--ready-timeout", 60)
             self.assertEqual(result, 1)
@@ -414,6 +495,23 @@ class SessionCLITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "AISTUDIO_WEB_PASSWORD"):
                 self.run_main(root, source, "--env-file", env)
             self.assertFalse((root / "runtime/aistudio/auth").exists())
+
+    def test_chmod_failure_does_not_print_import_success_or_mode_600(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            source, env = root / "session.json", root / "runtime/stack.env"
+            self.export(source)
+            session.proxykit.private_write(env, "AISTUDIO_PORT=7860\nAISTUDIO_WEB_PASSWORD=synthetic-console-password\n")
+            output = io.StringIO()
+            with mock.patch.object(session.proxykit, "ROOT", root), \
+                    mock.patch.object(sys, "argv", [str(spec.origin), str(source)]), \
+                    mock.patch.object(session.os, "chmod", side_effect=PermissionError("fixture chmod failure")), \
+                    contextlib.redirect_stdout(output):
+                with self.assertRaises(PermissionError):
+                    session.main()
+            self.assertNotIn("Imported", output.getvalue())
+            self.assertNotIn("Reused", output.getvalue())
+            self.assertNotIn("mode 600", output.getvalue())
 
     def test_missing_export_reports_the_wait_duration(self):
         with tempfile.TemporaryDirectory() as folder:
