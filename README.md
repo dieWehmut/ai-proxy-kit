@@ -165,6 +165,19 @@ AI Studio 和 Qoder 分别用 `--provider aistudio` / `--provider qoder` 单独�
 创建用户调用 Key 做 `--test` 需要 JWT 或邮箱/密码。
 上游不在同一个 Compose 网络时，单项指定 `--provider antigravity --upstream-url http://实际IP:8045`。
 
+> **优先用服务名，不要用宿主 IP。** 同一 Compose 项目内 `qoder`/`workbuddy`/`sub2api` 可直接互访
+> （`http://qoder:8790`、`http://workbuddy:7863`）。若 Sub2API 是**另一个 Compose 项目**部署的
+> （例如 `/opt/sub2api`），两个网络默认隔离，此时不要退化成 `http://172.18.0.1:8790` 这类宿主网关地址，
+> 而是把网关容器接进 Sub2API 的网络：
+>
+> ```bash
+> docker network connect sub2api_sub2api-network qoder-proxy
+> docker exec sub2api getent hosts qoder-proxy   # 应能解析
+> ```
+>
+> 接上后 Sub2API 里填 `http://qoder-proxy:8790`（容器名）或 `http://qoder:8790`（服务名）。
+> 该连接在容器重建后会丢失，长期部署请写进 compose 的 `networks:` 段。
+
 ## 端口、数据和验证
 
 ```bash
